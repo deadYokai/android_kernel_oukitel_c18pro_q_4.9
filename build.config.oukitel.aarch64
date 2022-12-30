@@ -1,0 +1,37 @@
+ARCH=arm64
+BRANCH=android-4.9
+CC=clang
+CLANG_TRIPLE=aarch64-linux-gnu-
+CROSS_COMPILE=aarch64-linux-androidkernel-
+DEFCONFIG=oukitel_defconfig
+EXTRA_CMDS=''
+KERNEL_DIR=common
+POST_DEFCONFIG_CMDS=""
+CLANG_PREBUILT_BIN=../out/clangp/clang-r353983c/bin/
+LINUX_GCC_CROSS_COMPILE_PREBUILTS_BIN=../out/clangp/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9/bin/
+FILES="
+arch/arm64/boot/Image.gz
+arch/arm64/boot/Image.gz-dtb
+arch/arm64/boot/mtk.dtb
+vmlinux
+System.map
+"
+STOP_SHIP_TRACEPRINTK=1
+#SKIP_DEFCONFIG=1
+SKIP_MRPROPER=1
+BUILD_BOOT_IMG=1
+BUILD_VENDOR_BOOT_IMG=1
+MKBOOTIMG_PATH=/usr/share/android-tools/mkbootimg/mkbootimg.py
+KERNEL_BINARY=Image.gz-dtb
+VENDOR_RAMDISK_BINARY=ramdisk.gz
+BOOT_IMAGE_HEADER_VERSION=2
+KERNEL_CMDLINE="bootopt=64S3,32N2,64N2 buildvariant=eng"
+TAGS_OFFSET=0x12f88000
+RAMDISK_OFFSET=0x11f88000
+KERNEL_OFFSET=0x00008000
+BASE_ADDRESS=0x40078000
+PAGE_SIZE=2048
+# AVB_SIGN_BOOT_IMG=1
+# AVB_BOOT_PARTITION_SIZE=33554432
+# AVB_BOOT_KEY=prebuilts/kernel-build-tools/linux-x86/share/avb/testkey_rsa2048.pem
+# AVB_BOOT_ALGORITHM=SHA256_RSA2048

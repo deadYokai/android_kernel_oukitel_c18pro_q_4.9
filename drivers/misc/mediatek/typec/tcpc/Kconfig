@@ -70,3 +70,13 @@ config PD_DBG_INFO
 	  Say Y to enable PD debug
 	  information
 	  Say N to disable
+
+config TCPC_SGM7220
+	bool "SGM7220 TypeC port Controller Driver"
+	depends on TCPC_CLASS
+	default n
+	help
+		Say Y to enable
+		WUSB3801X
+		TypeC port Controller
+		Driver

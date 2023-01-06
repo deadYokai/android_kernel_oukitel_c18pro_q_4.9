@@ -1,0 +1,5 @@
+config MTK_SC7A20
+        bool "SC7A20 for MediaTek package"
+        default n
+        help
+        If this option is set, it will support SC7A20 Accelerometer.

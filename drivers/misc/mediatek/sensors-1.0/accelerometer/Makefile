@@ -8,3 +8,5 @@ obj-$(CONFIG_MTK_ACCELHUB) += accelhub/
 obj-$(CONFIG_MTK_LSM6DS3HG)+= lsm6ds3hg/
 obj-$(CONFIG_MTK_BMI160_I2C)   += bmi160-i2c/
 obj-$(CONFIG_MTK_MPU6050G)   += mpu6050g/
+obj-$(CONFIG_MTK_STK8BAXX) += stk8baxx/
+obj-$(CONFIG_MTK_SC7A20) += sc7a20/

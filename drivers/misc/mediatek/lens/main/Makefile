@@ -73,6 +73,10 @@ MAIN_CFILES  += common/bu63169af/OIS_func.c
 MAIN_CFILES  += common/bu63169af/OIS_main.c
 MAIN_CFILES  += common/bu63169af/OIS_user.c
 endif
+ifeq ($(CONFIG_MTK_LENS_DW9800AF_SUPPORT),y)
+MAIN_CFILES += common/dw9800af/DW9800AF.c
+endif
+
 
 obj-m := mainaf.o
 mainaf-objs := $(MAIN_CFILES:.c=.o)
@@ -105,5 +109,9 @@ ifeq ($(CONFIG_MTK_LENS_BU63165AF_SUPPORT), y)
 else
   obj-y  += common/bu63169af/
 endif
+
+obj-$(CONFIG_MTK_LENS_DW9800AF_SUPPORT)    += common/dw9800af/
+obj-$(CONFIG_MTK_LENS_DW9800AF_SUPPORT)    += common/dw9800xlaf/
+obj-$(CONFIG_MTK_LENS_DW9800AF_SUPPORT)    += common/dw9800swaf/
 
 endif

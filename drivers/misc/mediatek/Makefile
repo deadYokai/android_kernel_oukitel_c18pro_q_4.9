@@ -157,6 +157,9 @@ obj-$(CONFIG_MTK_DEBUG_LATCH) += debug_latch/
 obj-$(CONFIG_MTK_USB2JTAG_SUPPORT) += usb2jtag/
 obj-$(CONFIG_MTK_WATCHPOINT) += watchpoint/
 
+obj-$(CONFIG_HCT_DEVICE_INFO_SUPPORT) += hct_devices/
+obj-$(CONFIG_HCT_FINGERPRINT_SUPPORT)  += fingerprint/
+
 obj-$(CONFIG_TRUSTKERNEL_TEE_SUPPORT) += tkcore/
 obj-y += perf/
 

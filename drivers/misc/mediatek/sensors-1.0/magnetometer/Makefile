@@ -10,3 +10,5 @@ obj-$(CONFIG_MTK_MAGHUB)        +=  maghub/
 obj-$(CONFIG_MTK_AKM09915_NEW)         +=  akm09915/
 obj-$(CONFIG_MTK_AKM09911)         +=  akm09911/
 obj-$(CONFIG_MTK_AKM09918)          +=  akm09918/
+obj-$(CONFIG_MTK_MMC5603)          += mmc5603/
+obj-$(CONFIG_MTK_QMC6308)      +=  qmc6308/

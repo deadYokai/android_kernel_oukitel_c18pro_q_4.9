@@ -33,7 +33,7 @@
 #include <mt-plat/sync_write.h>
 
 #ifdef CONFIG_MTK_LEGACY
-#include <mach/mt_clkmgr.h>
+#include <mach/mtk_clkmgr.h>
 #else
 #include "ddp_clkmgr.h"
 #endif

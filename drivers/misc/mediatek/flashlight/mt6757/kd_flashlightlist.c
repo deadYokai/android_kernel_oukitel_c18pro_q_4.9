@@ -50,10 +50,10 @@
 #include <linux/compat.h>
 #endif
 
-#include <mt-plat/mt_pwm.h>
+#include <mt-plat/mtk_pwm.h>
 #include "kd_flashlight.h"
 #include "flashlight_list.h"
-#include <mach/mt_pbm.h>
+#include <mach/mtk_pbm.h>
 #include <linux/string.h>
 
 #include <linux/hct_include/hct_project_all_config.h>

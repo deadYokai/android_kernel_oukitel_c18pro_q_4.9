@@ -1,7 +1,7 @@
 #ifndef __FLASHLIAHT_LIST_H__
 #define __FLASHLIAHT_LIST_H__
 
-#include <mach/mt_pwm_hal.h>
+#include <mach/mtk_pwm_hal.h>
 #include <linux/of.h>
 
 typedef struct {

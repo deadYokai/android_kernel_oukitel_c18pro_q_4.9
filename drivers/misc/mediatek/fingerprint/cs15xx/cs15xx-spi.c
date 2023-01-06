@@ -28,9 +28,9 @@
 #include <linux/jiffies.h>
 #include <linux/of_gpio.h>
 #include <linux/kthread.h>
-#include <mt-plat/mt_gpio.h>
+#include <mt-plat/mtk_gpio.h>
 #include <linux/platform_data/spi-mt65xx.h>
-#include "../../../spi/mediatek/mt6755/mt_spi.h"
+#include "../../../spi/mediatek/mt6757/mtk_spi.h"
 #include "cs15xx-spi.h"
 #include<linux/timer.h>
 #include <linux/wakelock.h>       

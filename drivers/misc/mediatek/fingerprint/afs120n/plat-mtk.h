@@ -12,7 +12,7 @@
 #include <linux/cdev.h>
 #include <linux/types.h>
 #include <linux/of_irq.h>
-#include "../../../spi/mediatek/mt6755/mt_spi.h" //modify zy
+#include "../../../spi/mediatek/mt6757/mtk_spi.h" //modify zy
 #include <linux/hct_include/hct_project_all_config.h>
 
 extern int hct_finger_get_gpio_info(struct platform_device *pdev);

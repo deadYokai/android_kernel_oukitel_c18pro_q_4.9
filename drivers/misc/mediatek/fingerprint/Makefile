@@ -15,5 +15,5 @@ obj-$(CONFIG_FINGERPRINT_MICROARRAY_A80T_TEE)	+=  microarray_v4.0.01/
 obj-$(CONFIG_FINGERPRINT_SUNWAVECORP_TEE)	+=  sunwavecorp_tee/
 obj-$(CONFIG_FINGERPRINT_SUNWAVE_TEE)	+=  sunwavecorp_tee/
 obj-$(CONFIG_FINGERPRINT_DFS747)	+=  dfs747/
-ccflags-y += -I$(srctree)/drivers/spi/mediatek/mt6755
+ccflags-y += -I$(srctree)/drivers/spi/mediatek/mt6757
 ccflags-y += -I$(srctree)/drivers/misc/mediatek/tkcore/core/

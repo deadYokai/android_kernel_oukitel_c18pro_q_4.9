@@ -40,7 +40,7 @@
 #define MSE_FUN(f)				pr_info(MSE_TAG"%s\n", __FUNCTION__)
 #define MSE_ERR(fmt, args...)	pr_err(MSE_TAG"%s %d : "fmt, __FUNCTION__, __LINE__, ##args)
 #define MSE_LOG(fmt, args...)	pr_info(MSE_TAG fmt, ##args)
-
+#define MAG_PR_ERR(fmt, args...) pr_info(MSE_TAG"%s\n", __FUNCTION__)
 
 static struct i2c_client *this_client = NULL;
 static short qmcd_delay = qmc6308_DEFAULT_DELAY;

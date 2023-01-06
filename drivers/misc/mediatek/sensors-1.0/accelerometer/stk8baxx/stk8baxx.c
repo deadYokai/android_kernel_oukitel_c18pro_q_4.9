@@ -1,3817 +1,3928 @@
 /*
-* Copyright (C) 2017 MediaTek Inc.
-*
-* This program is free software; you can redistribute it and/or modify
-* it under the terms of the GNU General Public License version 2 as
-* published by the Free Software Foundation.
-*
-* This program is distributed in the hope that it will be useful,
-* but WITHOUT ANY WARRANTY; without even the implied warranty of
-* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-* See http://www.gnu.org/licenses/gpl-2.0.html for more details.
-*/
-
-
-#include <linux/interrupt.h>
-#include <linux/i2c.h>
-#include <linux/slab.h>
-#include <linux/irq.h>
-#include <linux/miscdevice.h>
-#include <linux/uaccess.h>
+ * stk8baxx_driver.c - Linux driver for sensortek stk8baxx accelerometer
+ * Copyright (C) 2017 Sensortek
+ */
 #include <linux/delay.h>
+#include <linux/i2c.h>
+#include <linux/init.h>
 #include <linux/input.h>
-#include <linux/workqueue.h>
-#include <linux/kobject.h>
+#include <linux/interrupt.h>
+#include <linux/irq.h>
+#include <linux/module.h>
+#include <linux/mutex.h>
+#include <linux/of_gpio.h>
+#include <linux/of_irq.h>
 #include <linux/platform_device.h>
-#include <linux/atomic.h>
-#include <linux/math64.h>
-#define POWER_NONE_MACRO MT65XX_POWER_NONE
-#include <cust_acc.h>
+#include <linux/slab.h>
+#include <linux/timer.h>
+#include <linux/vmalloc.h>
+
 #include <accel.h>
-#ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB
-#include <SCP_sensorHub.h>
-#endif				/* #ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB */
-#include "stk8baxx.h"
+#include "cust_acc.h"
+//#include "hwmsen_dev.h"
+//#include "hwmsen_helper.h"
+//#include "hwmsensor.h"
+#include "sensors_io.h"
 
-/*----------------------------------------------------------------------------*/
-/* #define CONFIG_SENSORS_STK8BA53 */
-#define CONFIG_SENSORS_STK8BA50
+/********* Global *********/
+/**
+ * enalbe INTERRUPT_MODE:
+ *          SIGMOTION, DATA use the same INT1.
+ * disable INTERRUPT_MODE:
+ *          DATA read via polling, SIGMOTION use INT1.
+ */
+//#define INTERRUPT_MODE
 
-#define STK_DRIVER_VERSION	"3.3.0 20161123"
-#define STK_RESUME_RE_INIT
+/* Turn on sig motion */
+#define STK_SIG_MOTION
 
-#define CONFIG_STK8BAXX_LOWPASS
-
+/* enable check code feature */
 #define STK_CHECK_CODE
-#define ONTIM_CALI
-
-#define STK8BAXX_INIT_ODR		10	/* 9=31Hz, 10=62Hz, 11=125Hz */
-#define  STK8BAXX_SPTIME_NO		3
-#define  STK8BAXX_SPTIME_BASE	0x9
-
-#ifdef MT6516
-#define POWER_NONE_MACRO MT6516_POWER_NONE
-#else
-#define POWER_NONE_MACRO MT65XX_POWER_NONE
-#endif
-
-/*----------------------------------------------------------------------------*/
-#define STK8BAXX_RNG_2G			0x3
-#define STK8BAXX_RNG_4G			0x5
-#define STK8BAXX_RNG_8G			0x8
-#define STK8BAXX_RNG_16G		0xC
-
-#ifdef CONFIG_SENSORS_STK8BA53
-/* Parameters under +-4g dynamic range */
-#define STK_DEF_DYNAMIC_RANGE	STK8BAXX_RNG_4G
-
-#if (STK_DEF_DYNAMIC_RANGE == STK8BAXX_RNG_4G)
-#define STK_LSB_1G			512
-#elif (STK_DEF_DYNAMIC_RANGE == STK8BAXX_RNG_2G)
-#define STK_LSB_1G			1024
-#elif (STK_DEF_DYNAMIC_RANGE == STK8BAXX_RNG_8G)
-#define STK_LSB_1G			256
-#elif (STK_DEF_DYNAMIC_RANGE == STK8BAXX_RNG_16G)
-#define STK_LSB_1G			128
-#endif
-
-#define STK_ZG_COUNT		(STK_LSB_1G / 128)
-#define STK_TUNE_XYOFFSET	(STK_LSB_1G * 3 / 10)
-#define STK_TUNE_ZOFFSET	(STK_LSB_1G * 3 / 5)
-#define STK_TUNE_NOISE		(STK_LSB_1G / 10)
-#else
-/* Parameters under +-2g dynamic range */
-#define STK_DEF_DYNAMIC_RANGE	STK8BAXX_RNG_2G
-
-#if (STK_DEF_DYNAMIC_RANGE == STK8BAXX_RNG_2G)
-#define STK_LSB_1G			256
-#elif (STK_DEF_DYNAMIC_RANGE == STK8BAXX_RNG_4G)
-#define STK_LSB_1G			128
-#elif (STK_DEF_DYNAMIC_RANGE == STK8BAXX_RNG_8G)
-#define STK_LSB_1G			64
-#elif (STK_DEF_DYNAMIC_RANGE == STK8BAXX_RNG_16G)
-#define STK_LSB_1G			32
-#endif
-#define STK_ZG_COUNT		(STK_LSB_1G / 128 + 1)
-#define STK_TUNE_XYOFFSET	(STK_LSB_1G * 3 / 10)
-#define STK_TUNE_ZOFFSET	(STK_LSB_1G * 3 / 5)
-#define STK_TUNE_NOISE		(STK_LSB_1G / 10)
-#endif
-
-#define STK_TUNE_NUM 60
-#define STK_TUNE_DELAY 60
-
-#define STK_EVENT_SINCE_EN_LIMIT_DEF	(2)
-/*----------------------------------------------------------------------------*/
 #ifdef STK_CHECK_CODE
-#include "stkchkcode.h"
-#endif
-/*----------------------------------------------------------------------------*/
-#define STK_SAMPLE_NO				10
-#define STK_ACC_CALI_VER0			0x18
-#define STK_ACC_CALI_VER1			0x03
-#define STK_ACC_CALI_END				'\0'
-#define STK_ACC_CALI_FILE				"/data/misc/stkacccali.conf"
-/* #define STK_ACC_CALI_FILE             "/system/etc/stkacccali.conf" */
-#define STK_ACC_CALI_FILE_SDCARD		"/sdcard/stkacccali.conf"
-#define STK_ACC_CALI_FILE_SIZE		25
+    #include "stk8baxx.h"
+    /* Ignore the first STK_CHECKCODE_IGNORE+1 data for STK_CHECK_CODE feature */
+    #define STK_CHECKCODE_IGNORE    3
+    /* for stk8baxx_data.cc_status */
+    #define STK_CCSTATUS_NORMAL     0x0
+    #define STK_CCSTATUS_ZSIM       0x1
+    #define STK_CCSTATUS_XYSIM      0x2
+#endif /* STK_CHECK_CODE */
 
-#define STK_K_SUCCESS_TUNE			0x04
-#define STK_K_SUCCESS_FT2			0x03
-#define STK_K_SUCCESS_FT1			0x02
-#define STK_K_SUCCESS_FILE			0x01
-#define STK_K_NO_CALI				0xFF
-#define STK_K_RUNNING				0xFE
-#define STK_K_FAIL_LRG_DIFF			0xFD
-#define STK_K_FAIL_OPEN_FILE			0xFC
-#define STK_K_FAIL_W_FILE				0xFB
-#define STK_K_FAIL_R_BACK				0xFA
-#define STK_K_FAIL_R_BACK_COMP		0xF9
-#define STK_K_FAIL_I2C				0xF8
-#define STK_K_FAIL_K_PARA				0xF7
-#define STK_K_FAIL_OUT_RG			0xF6
-#define STK_K_FAIL_ENG_I2C			0xF5
-#define STK_K_FAIL_FT1_USD			0xF4
-#define STK_K_FAIL_FT2_USD			0xF3
-#define STK_K_FAIL_WRITE_NOFST		0xF2
-#define STK_K_FAIL_OTP_5T				0xF1
-#define STK_K_FAIL_PLACEMENT			0xF0
+/*
+ * enable low-pass mode.
+ * Define STK_FIR to turn ON low pass mode.
+ */
+#define STK_FIR
+#ifdef STK_FIR
+    #define STK_FIR_LEN         2
+    #define STK_FIR_LEN_MAX     32
+#endif /* STK_FIR */
 
-#define POSITIVE_Z_UP		0
-#define NEGATIVE_Z_UP	1
-#define POSITIVE_X_UP		2
-#define NEGATIVE_X_UP	3
-#define POSITIVE_Y_UP		4
-#define NEGATIVE_Y_UP	5
+#ifdef STK_FIR
+struct data_fir
+{
+    s16 xyz[STK_FIR_LEN_MAX][3];
+    int sum[3];
+    int idx;
+    int count;
+};
+#endif /* STK_FIR */
 
-/*------------------stk8baxx registers-------------------------*/
-#define	STK8BAXX_XOUT1			0x02
-#define	STK8BAXX_XOUT2			0x03
-#define	STK8BAXX_YOUT1			0x04
-#define	STK8BAXX_YOUT2			0x05
-#define	STK8BAXX_ZOUT1			0x06
-#define	STK8BAXX_ZOUT2			0x07
-#define	STK8BAXX_INTSTS1		0x09
-#define	STK8BAXX_INTSTS2		0x0A
-#define	STK8BAXX_EVENTINFO1	0x0B
-#define	STK8BAXX_EVENTINFO2	0x0C
-#define	STK8BAXX_RANGESEL		0x0F
-#define	STK8BAXX_BWSEL			0x10
-#define	STK8BAXX_POWMODE		0x11
-#define	STK8BAXX_DATASETUP		0x13
-#define	STK8BAXX_SWRST			0x14
-#define	STK8BAXX_INTEN1			0x16
-#define	STK8BAXX_INTEN2			0x17
-#define	STK8BAXX_INTMAP1		0x19
-#define	STK8BAXX_INTMAP2		0x1A
-#define	STK8BAXX_INTMAP3		0x1B
-#define	STK8BAXX_DATASRC		0x1E
-#define	STK8BAXX_INTCFG1		0x20
-#define	STK8BAXX_INTCFG2		0x21
-#define	STK8BAXX_LGDLY			0x22
-#define	STK8BAXX_LGTHD			0x23
-#define	STK8BAXX_HLGCFG		0x24
-#define	STK8BAXX_HGDLY			0x25
-#define	STK8BAXX_HGTHD			0x26
-#define	STK8BAXX_SLOPEDLY		0x27
-#define	STK8BAXX_SLOPETHD		0x28
-#define	STK8BAXX_TAPTIME		0x2A
-#define	STK8BAXX_TAPCFG		0x2B
-#define	STK8BAXX_ORIENTCFG		0x2C
-#define	STK8BAXX_ORIENTTHETA	0x2D
-#define	STK8BAXX_FLATTHETA		0x2E
-#define	STK8BAXX_FLATHOLD		0x2F
-#define	STK8BAXX_SLFTST			0x32
-#define	STK8BAXX_INTFCFG		0x34
-#define	STK8BAXX_OFSTCOMP1	0x36
-#define	STK8BAXX_OFSTCOMP2	0x37
-#define	STK8BAXX_OFSTFILTX		0x38
-#define	STK8BAXX_OFSTFILTY		0x39
-#define	STK8BAXX_OFSTFILTZ		0x3A
-#define	STK8BAXX_OFSTUNFILTX	0x3B
-#define	STK8BAXX_OFSTUNFILTY	0x3C
-#define	STK8BAXX_OFSTUNFILTZ	0x3D
+/*
+ * enable Zero-G simulation.
+ * This feature only works when both of STK_FIR and STK_ZG are turn ON.
+ */
+//#define STK_ZG
+#if (defined STK_FIR && defined STK_ZG)
+    #define ZG_FACTOR   0
+#endif /* defined STK_FIR && defined STK_ZG */
 
-/*	ZOUT1 register	*/
-#define STK8BAXX_O_NEW			0x01
+#define STK_ACC_DRIVER_VERSION "404.0.1" /* kernel-version:major-number:minor-number */
+#define STK_ACC_DEV_NAME "stk8baxx"
+#define STK8BAXX_IRQ_INT1_LABEL "STK_ACCEL_INT1"
+#define STK8BAXX_IRQ_INT1_NAME "stk8baxx_int1"
 
-/*	SWRST register	*/
-#define	STK8BAXX_SWRST_VAL		0xB6
+#ifndef INTERRUPT_MODE /* no INTERRUPT_MODE, polling mode */
+    #define STK8BAXX_IRQ_INT2_LABEL "STK_ACCEL_INT2"
+    #define STK8BAXX_IRQ_INT2_NAME "stk8baxx_int2"
+#endif /* no INTERRUPT_MODE */
 
-/*	STK8BAXX_POWMODE register	*/
-#define STK8BAXX_MD_SUSPEND	0x80
-#define STK8BAXX_MD_NORMAL		0x00
-#define STK8BAXX_MD_SLP_MASK	0x1E
+#define STK_ACC_TAG                 "[accel]"
+#define STK_ACC_FUN(f)              printk(KERN_ERR STK_ACC_TAG" %s\n", __FUNCTION__)
+#define STK_ACC_ERR(fmt, args...)   printk(KERN_ERR STK_ACC_TAG" %s %d: "fmt"\n", __FUNCTION__, __LINE__, ##args)
+#define STK_ACC_LOG(fmt, args...)   printk(KERN_ERR STK_ACC_TAG" %s %d: "fmt"\n", __FUNCTION__, __LINE__, ##args)
 
-/*	RANGESEL register	*/
-#define STK8BAXX_RANGE_MASK	0x0F
+#ifdef CONFIG_CUSTOM_KERNEL_ACCELEROMETER_MODULE
+bool success_Flag;
+#endif /* CONFIG_CUSTOM_KERNEL_ACCELEROMETER_MODULE */
 
-/* OFSTCOMP1 register*/
-#define STK8BAXX_OF_CAL_DRY_MASK	0x10
-#define CAL_AXIS_X_EN					0x20
-#define CAL_AXIS_Y_EN					0x40
-#define CAL_AXIS_Z_EN					0x60
-#define CAL_OFST_RST					0x80
+#define STK_AXIS_X	  				0
+#define STK_AXIS_Y	  				1
+#define STK_AXIS_Z	  				2
+#define STK_AXES_NUM				3
+/* file_operateions parameters */
+#define STK_BUFSIZE                 60
 
-/* OFSTCOMP2 register*/
-#define CAL_TG_X0_Y0_ZPOS1		0x20
-#define CAL_TG_X0_Y0_ZNEG1		0x40
+/* calibration parameters */
+#define STK_CALI_SAMPLE_NO          10
+#define STK_CALI_VER0               0x18
+#define STK_CALI_VER1               0x03
+#define STK_CALI_END                '\0'
+#define STK_CALI_FILE               "/data/misc/sensor/stkacccali.conf"
+#define STK_CALI_FILE_SIZE          25
+/* parameter for cali_status/atomic_t and cali file */
+#define STK_K_SUCCESS_FILE          0x01
+/* parameter for cali_status/atomic_t */
+#define STK_K_FAIL_WRITE_OFST       0xF2
+#define STK_K_FAIL_I2C              0xF8
+#define STK_K_FAIL_W_FILE           0xFB
+#define STK_K_FAIL_VERIFY_CALI      0xFD
+#define STK_K_RUNNING               0xFE
+#define STK_K_NO_CALI               0xFF
 
-#define STK8BAXX_I2C_SLAVE_ADDR		0x18
+/* stk8baxx slave address */
+#define STK8BAXX_SLAVE_ADDR         0x18
 
-#define STK8BA50_ID		0x09	/* reg 0x22, STK8BAXX_LGDLY */
-#define STK8BA50R_ID		0x86	/* reg 0x0 */
-#define STK8BA53_ID		0x87	/* reg 0x0 */
-/*----------------------------------------------------------------------------*/
-#define DEBUG 1
-/*----------------------------------------------------------------------------*/
+/* stk8baxx register */
+#define STK8BAXX_REG_CHIPID             0x00
+#define STK8BAXX_REG_XOUT1              0x02
+#define STK8BAXX_REG_XOUT2              0x03
+#define STK8BAXX_REG_YOUT1              0x04
+#define STK8BAXX_REG_YOUT2              0x05
+#define STK8BAXX_REG_ZOUT1              0x06
+#define STK8BAXX_REG_ZOUT2              0x07
+#define STK8BAXX_REG_INTSTS1            0x09
+#define STK8BAXX_REG_INTSTS2            0x0A
+#define STK8BAXX_REG_RANGESEL           0x0F
+#define STK8BAXX_REG_BWSEL              0x10
+#define STK8BAXX_REG_POWMODE            0x11
+#define STK8BAXX_REG_SWRST              0x14
+#define STK8BAXX_REG_INTEN1             0x16
+#define STK8BAXX_REG_INTEN2             0x17
+#define STK8BAXX_REG_INTMAP1            0x19
+#define STK8BAXX_REG_INTMAP2            0x1A
+#define STK8BAXX_REG_INTCFG1            0x20
+#define STK8BAXX_REG_INTCFG2            0x21
+#define STK8BAXX_REG_SLOPEDLY           0x27
+#define STK8BAXX_REG_SLOPETHD           0x28
+#define STK8BAXX_REG_SIGMOT1            0x29
+#define STK8BAXX_REG_SIGMOT2            0x2A
+#define STK8BAXX_REG_SIGMOT3            0x2B
+#define STK8BAXX_REG_INTFCFG            0x34
+#define STK8BAXX_REG_OFSTCOMP1          0x36
+#define STK8BAXX_REG_OFSTX              0x38
+#define STK8BAXX_REG_OFSTY              0x39
+#define STK8BAXX_REG_OFSTZ              0x3A
+
+/* STK8BAXX_REG_CHIPID */
+#define STK8BA50_R_ID                   0x86
+#define STK8BA53_ID                     0x87
+
+/* STK8BAXX_REG_INTSTS1 */
+#define STK8BAXX_INTSTS1_SIG_MOT_STS     0x1
+
+/* STK8BAXX_REG_RANGESEL */
+#define STK8BAXX_RANGESEL_2G             0x3
+#define STK8BAXX_RANGESEL_4G             0x5
+#define STK8BAXX_RANGESEL_8G             0x8
+#define STK8BAXX_RANGESEL_BW_MASK        0x1F
+#define STK8BAXX_RANGESEL_DEF            STK8BAXX_RANGESEL_2G
+
+/* STK8BAXX_REG_BWSEL */
+#define STK8BAXX_BWSEL_INIT_ODR          0x0A    /* ODR = BW x 2 = 62.5Hz */
+/* ODR: 31.25, 62.5, 125 */
+const static int STK8BAXX_SAMPLE_TIME[] = {32000, 16000, 8000}; /* usec */
+#define STK8BAXX_SPTIME_BASE             0x9     /* for 32000, ODR:31.25 */
+#define STK8BAXX_SPTIME_BOUND            0xB     /* for 8000, ODR:125 */
+
+/* STK8BAXX_REG_POWMODE */
+#define STK8BAXX_PWMD_SUSPEND            0x80
+#define STK8BAXX_PWMD_LOWPOWER           0x40
+#define STK8BAXX_PWMD_NORMAL             0x00
+#define STK8BAXX_PWMD_SLP_MASK           0x3E
+
+/* STK8BAXX_REG_SWRST */
+#define STK8BAXX_SWRST_VAL               0xB6
+
+/* STK8BAXX_REG_INTEN1 */
+#define STK8BAXX_INTEN1_SLP_EN_XYZ       0x07
+
+/* STK8BAXX_REG_INTEN2 */
+#define STK8BAXX_INTEN2_DATA_EN          0x10
+
+/* STK8BAXX_REG_INTMAP1 */
+#define STK8BAXX_INTMAP1_SIGMOT2INT1         0x01
+
+/* STK8BAXX_REG_INTMAP2 */
+#define STK8BAXX_INTMAP2_DATA2INT1           0x01
+
+/* STK8BAXX_REG_INTCFG1 */
+#define STK8BAXX_INTCFG1_INT1_ACTIVE_H       0x01
+#define STK8BAXX_INTCFG1_INT1_OD_PUSHPULL    0x00
+
+/* STK8BAXX_REG_INTCFG2 */
+#define STK8BAXX_INTCFG2_NOLATCHED           0x00
+#define STK8BAXX_INTCFG2_LATCHED             0x0F
+#define STK8BAXX_INTCFG2_INT_RST             0x80
+
+/* STK8BAXX_REG_SLOPETHD */
+#define STK8BAXX_SLOPETHD_DEF                0x14
+
+/* STK8BAXX_REG_SIGMOT1 */
+#define STK8BAXX_SIGMOT1_SKIP_TIME_3SEC      0x96    /* default value */
+
+/* STK8BAXX_REG_SIGMOT2 */
+#define STK8BAXX_SIGMOT2_SIG_MOT_EN          0x02
+
+/* STK8BAXX_REG_SIGMOT3 */
+#define STK8BAXX_SIGMOT3_PROOF_TIME_1SEC     0x32    /* default value */
+
+/* STK8BAXX_REG_INTFCFG */
+#define STK8BAXX_INTFCFG_I2C_WDT_EN          0x04
+
+/* STK8BAXX_REG_OFSTCOMP1 */
+#define STK8BAXX_OFSTCOMP1_OFST_RST          0x80
+
+/* STK8BAXX_REG_OFSTx */
+#define STK8BAXX_OFST_LSB                    128     /* 8 bits for +-1G */
 
 
-/*the adapter id will be available in customization*/
-/* static unsigned short stk8baxx_force[] = {0x00, STK8BAXX_I2C_SLAVE_ADDR, I2C_CLIENT_END, I2C_CLIENT_END}; */
-/* static const unsigned short *const stk8baxx_forces[] = { stk8baxx_force, NULL }; */
-/* static struct i2c_client_address_data stk8baxx_addr_data = { .forces = stk8baxx_forces,}; */
+static DEFINE_MUTEX(STK8BA5X_i2c_mutex);
+#define C_I2C_FIFO_SIZE	 8
 
-/*----------------------------------------------------------------------------*/
-static int stk8baxx_i2c_probe(struct i2c_client *client, const struct i2c_device_id *id);
-static int stk8baxx_i2c_remove(struct i2c_client *client);
-#ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB
-static int gsensor_setup_irq(void);
-#endif				/* #ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB */
 
-static int gsensor_local_init(void);
-static int gsensor_remove(void);
-static int gsensor_set_delay(u64 ns);
-static int stk8baxx_suspend(struct i2c_client *client, pm_message_t msg);
-static int stk8baxx_resume(struct i2c_client *client);
-static int STK8BAXX_SetOffset(struct i2c_client *client, char buf[]);
-static int stk8baxx_store_in_file(u8 offset[], u8 status, u32 variance[]);
-
-static DEFINE_MUTEX(gsensor_mutex);
-static DEFINE_MUTEX(gsensor_scp_en_mutex);
-
-static bool enable_status;
-
-static int gsensor_init_flag = -1;	/* 0<==>OK -1 <==> fail */
-
-/* static int stk8baxx_i2c_detect(struct i2c_client *client, int kind, struct i2c_board_info *info); */
-
-static struct acc_init_info stk8baxx_init_info = {
-	.name = "stk8baxx",
-	.init = gsensor_local_init,
-	.uninit = gsensor_remove,
+struct stk8baxx_data
+{
+    /* platform related */
+    struct i2c_client           *client;
+    struct acc_hw               hw;
+    struct hwmsen_convert       cvt;
+    /* chip informateion */
+    int                         pid;
+    /* system operation */
+    atomic_t                    enabled;            /* chip is enabled or not */
+    atomic_t                    enabled_for_acc;    /* enable status for acc_control_path.enable_nodata */
+    atomic_t                    cali_status;        /* cali status */
+    atomic_t                    recv;               /* recv data. DEVICE_ATTR(recv, ...) */
+    //struct mutex                reg_lock;           /* mutex lock for register R/W */
+    u8                          power_mode;
+    bool                        temp_enable;        /* record current power status. For Suspend/Resume used. */
+    int                         sensitivity;        /* sensitivity, bit number per G */
+    s16                         xyz[3];             /* The latest data of xyz */
+    s16                         steps;              /* The latest step counter value */
+#ifdef INTERRUPT_MODE
+    int                         interrupt_int1_pin; /* get from device tree */
+    int                         irq1;               /* for all data usage(DATA, SIGMOTION) */
+    struct workqueue_struct     *alldata_workqueue; /* all data workqueue for int1. (DATA, SIGMOTION) */
+    struct work_struct          alldata_work;       /* all data work for int1. (DATA, SIGMOTION) */
+#else /* no INTERRUPT_MODE */
+    int                         interrupt_int1_pin; /* get from device tree */
+    int                         irq1;               /* for sig usage */
+    struct delayed_work         sig_delaywork;      /* sig delay work for int1. */
+    struct delayed_work         accel_delaywork;
+    struct hrtimer              accel_timer;
+    ktime_t                     poll_delay;
+#endif /* INTERRUPT_MODE */
+#ifdef STK_CHECK_CODE
+    int                         cc_count;
+    u8                          cc_status;          /* refer STK_CCSTATUS_x */
+#endif /* STK_CHECK_CODE */
+#ifdef STK_FIR
+    struct data_fir             fir;
+    /*
+     * fir_len
+     * 0: turn OFF FIR operation
+     * 1 ~ STK_FIR_LEN_MAX: turn ON FIR operation
+     */
+    atomic_t                    fir_len;
+#endif /* STK_FIR */
+	s16                     	cali_sw[STK_AXES_NUM + 1];
 };
 
-/*----------------------------------------------------------------------------*/
-enum ADX_TRC {
-	ADX_TRC_FILTER = 0x01,
-	ADX_TRC_RAWDATA = 0x02,
-	ADX_TRC_IOCTL = 0x04,
-	ADX_TRC_CALI = 0X08,
-	ADX_TRC_INFO = 0X10,
+struct stk8baxx_data *stk_data;
+static int stk8baxx_init_flag = 0;
+
+static int stk_acc_init(void);
+static int stk_acc_uninit(void);
+
+static struct acc_init_info stk_acc_init_info =
+{
+    .name = STK_ACC_DEV_NAME,
+    .init = stk_acc_init,
+    .uninit = stk_acc_uninit,
 };
-/*----------------------------------------------------------------------------*/
-struct scale_factor {
-	u8 whole;
-	u8 fraction;
-};
-/*----------------------------------------------------------------------------*/
-struct data_resolution {
-	struct scale_factor scalefactor;
-	int sensitivity;
-};
-/*----------------------------------------------------------------------------*/
-#define C_MAX_FIR_LENGTH (32)
-/*----------------------------------------------------------------------------*/
-struct data_filter {
-	s16 raw[C_MAX_FIR_LENGTH][STK8BAXX_AXES_NUM];
-	int sum[STK8BAXX_AXES_NUM];
-	int num;
-	int idx;
-};
-/*----------------------------------------------------------------------------*/
-struct stk8baxx_i2c_data {
-	struct i2c_client *client;
-	struct acc_hw hw;
-	struct hwmsen_convert cvt;
-
-#ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB
-	struct work_struct irq_work;
-#endif				/* #ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB */
-
-	/*misc */
-	struct data_resolution *reso;
-	atomic_t trace;
-	atomic_t suspend;
-	atomic_t selftest;
-	atomic_t filter;
-	s16 cali_sw[STK8BAXX_AXES_NUM + 1];
-
-	/*data */
-	s8 offset[STK8BAXX_AXES_NUM + 1];	/*+1: for 4-byte alignment */
-	s16 data[STK8BAXX_AXES_NUM + 1];
-
-#ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB
-	int SCP_init_done;
-#endif				/* #ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB */
-
-#if defined(CONFIG_STK8BAXX_LOWPASS)
-	atomic_t firlen;
-	atomic_t fir_en;
-	struct data_filter fir;
-#endif
-	atomic_t event_since_en;
-	atomic_t event_since_en_limit;
-	atomic_t recv_reg;
-	s16 re_enable;
-	char stk_tune_offset_record[3];
-#ifdef STK_TUNE
-	int stk_tune_offset[3];
-	int stk_tune_sum[3];
-	int stk_tune_max[3];
-	int stk_tune_min[3];
-	int stk_tune_index;
-	int stk_tune_done;
-	s64 stk_tune_square_sum[3];
-#endif
-	bool sensor_power;
-	bool first_enable;
-	atomic_t cali_status;
-	uint32_t gsensor_delay;
-	int pid;
-};
-
-#ifdef CONFIG_OF
-static const struct of_device_id accel_of_match[] = {
-	{.compatible = "mediatek,accsensor"},
-	{},
-};
-#endif
-
-static const struct i2c_device_id stk8baxx_i2c_id[] = { {STK8BAXX_DEV_NAME, 0}, {} };
-static const int STK8BAXX_SAMPLE_TIME[STK8BAXX_SPTIME_NO] = { 32000, 16000, 8000 };
-
-/*----------------------------------------------------------------------------*/
-static struct i2c_driver stk8baxx_i2c_driver = {
-	.driver = {
-		   /* .owner          = THIS_MODULE, */
-		   .name = STK8BAXX_DEV_NAME,
-#ifdef CONFIG_OF
-		   .of_match_table = accel_of_match,
-#endif
-		   },
-	.probe = stk8baxx_i2c_probe,
-	.remove = stk8baxx_i2c_remove,
-/* .detect                         = stk8baxx_i2c_detect, */
-	.suspend = stk8baxx_suspend,
-	.resume = stk8baxx_resume,
-	.id_table = stk8baxx_i2c_id,
-/* .address_data = &stk8baxx_addr_data, */
-};
-
-/*----------------------------------------------------------------------------*/
-static struct i2c_client *stk8baxx_i2c_client;
-static struct stk8baxx_i2c_data *obj_i2c_data;
-static bool sensor_power = true;
-#ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB
-static bool scp_sensor_power = true;
-#endif
-
-static struct GSENSOR_VECTOR3D gsensor_gain;
-/*----------------------------------------------------------------------------*/
-#define GSE_TAG                  "[Gsensor] "
-#define GSE_FUN(f)               pr_debug(GSE_TAG"%s\n", __func__)
-#define GSE_ERR(fmt, args...)    pr_err(GSE_TAG"%s %d : "fmt, __func__, __LINE__, ##args)
-#define GSE_LOG(fmt, args...)    pr_debug(GSE_TAG fmt, ##args)
-/*----------------------------------------------------------------------------*/
-
-/*----------------------------------------------------------------------------*/
-#ifdef CONFIG_SENSORS_STK8BA53
-static struct data_resolution stk8baxx_data_resolution[] = {
-	/* combination by {FULL_RES,RANGE} */
-
-	{{0, 98}, 1024},	/*+/-2g in 12-bit resolution:  0.98 mg/LSB */
-	{{1, 95}, 512},		/*+/-4g     in 12-bit resolution:  1.95 mg/LSB */
-	{{3, 9}, 256},		/*+/-8g in 12-bit resolution: 3.90 mg/LSB */
-	{{7, 81}, 128},		/*+/-16g in 12-bit resolution: 7.81 mg/LSB */
-};
-#else
-static struct data_resolution stk8baxx_data_resolution[] = {
-	/* combination by {FULL_RES,RANGE} */
-
-	{{3, 9}, 256},		/*+/-2g      in 10-bit resolution:  3.9 mg/LSB */
-	{{7, 8}, 128},		/*+/-4g      in 10-bit resolution:  7.8 mg/LSB */
-	{{15, 6}, 64},		/*+/-8g  in 10-bit resolution: 15.6 mg/LSB */
-	{{31, 2}, 32},		/*+/-16g in 10-bit resolution: 31.2 mg/LSB */
-};
-#endif
-static struct i2c_client *stk8baxx_i2c_client;
-static struct stk8baxx_i2c_data *obj_i2c_data;
-/* the same for both stk8ba53 and stk8ba50/-R */
-static struct data_resolution stk8baxx_offset_resolution = { {7, 8}, 128 };
-#ifdef ONTIM_CALI
-#define _STK_SUPPORT_LRF_
-#define PROINFO_CALI_DATA_OFFSET        904
-#define GSENSOR_CALI_NAME_LEN                           8
-#define GSENSOR_CALI_DATA_LEN                           32
-#define STK8BAXX_BUF_SIZE    256
-#define STK8BAXX_RETCODE_SUCCESS                 (0)
-
-static char file_path[STK8BAXX_BUF_SIZE] = "/bak/stk8baxx-calib.txt";
-static char backup_file_path[STK8BAXX_BUF_SIZE] = "/dev/block/platform/mtk-msdc.0/11230000.msdc0/by-name/proinfo";
-static int s_CaliLoadEnable;
-static int stk8baxx_audo_cali_enable;	/* 0--disable auto calib; 1--enable auto calib */
-static int stk8baxx_cali_enable;	/* 0--stop calib; 1--start calib; 2--calib running; */
-
-static int s_nIsCaliLoaded;
-static struct file *fd_file;
-static mm_segment_t oldfs;
-#endif
-
-#ifdef _STK_SUPPORT_LRF_
-struct S_LRF_CB {
-	s16 nIsNewRound;
-	s16 nPreDiff;
-	s16 nPreValue;
-	s16 nMaxValue;
-	s16 nMinValue;
-	s16 nRepValue;
-	s16 nNewDataMonitorCount;
-};
-#endif
-#ifdef _STK_SUPPORT_LRF_
-#define STK_AXIS_X      0
-#define STK_AXIS_Y      1
-#define STK_AXIS_Z      2
-#define STK_AXES_NUM    3
-static struct S_LRF_CB s_taLRF_CB[STK_AXES_NUM];
-#endif
-
-#ifdef _STK_SUPPORT_LRF_
-/*****************************************
- *** _STK_LowResFilter
- *****************************************/
-static void _STK_LowResFilter(s16 nAxis, s16 naData[STK_AXES_NUM])
-{
-#define _LRF_DIFF_COUNT_POS                  2
-#define _LRF_DIFF_COUNT_NEG                  (-_LRF_DIFF_COUNT_POS)
-#define _LRF_DIFF_BOUNDARY_POS               (_LRF_DIFF_COUNT_POS + 1)
-#define _LRF_DIFF_BOUNDARY_NEG               (_LRF_DIFF_COUNT_NEG - 1)
-#define _LRF_DIFF_DATA_UNCHANGE_MAX_COUNT    11
-
-	signed int _nCurrDiff = 0;
-	signed int _nSumDiff = 0;
-	s16 _nCurrData = naData[nAxis];
-
-	_nCurrDiff = (_nCurrData - s_taLRF_CB[nAxis].nRepValue);
-
-	if ((_LRF_DIFF_COUNT_NEG < _nCurrDiff) && (_nCurrDiff < _LRF_DIFF_COUNT_POS)) {
-		if (s_taLRF_CB[nAxis].nIsNewRound) {
-			s_taLRF_CB[nAxis].nMaxValue = _nCurrData;
-			s_taLRF_CB[nAxis].nMinValue = _nCurrData;
-
-			s_taLRF_CB[nAxis].nIsNewRound = 0;
-			s_taLRF_CB[nAxis].nNewDataMonitorCount = 0;
-		} else {
-			if (_nCurrData > s_taLRF_CB[nAxis].nMaxValue)
-				s_taLRF_CB[nAxis].nMaxValue = _nCurrData;
-			else if (_nCurrData < s_taLRF_CB[nAxis].nMinValue)
-				s_taLRF_CB[nAxis].nMinValue = _nCurrData;
-
-			if (s_taLRF_CB[nAxis].nMinValue != s_taLRF_CB[nAxis].nMaxValue) {
-				if (_nCurrData == s_taLRF_CB[nAxis].nPreValue)
-					s_taLRF_CB[nAxis].nNewDataMonitorCount++;
-				else
-					s_taLRF_CB[nAxis].nNewDataMonitorCount = 0;
-			}
-		}
-
-		if (1 != (s_taLRF_CB[nAxis].nMaxValue - s_taLRF_CB[nAxis].nMinValue))
-			s_taLRF_CB[nAxis].nRepValue =
-			    ((s_taLRF_CB[nAxis].nMaxValue + s_taLRF_CB[nAxis].nMinValue) / 2);
-
-		_nSumDiff = (_nCurrDiff + s_taLRF_CB[nAxis].nPreDiff);
-
-		if (_nCurrDiff)
-			s_taLRF_CB[nAxis].nPreDiff = _nCurrDiff;
-
-		if ((_LRF_DIFF_BOUNDARY_NEG < _nSumDiff) && (_nSumDiff < _LRF_DIFF_BOUNDARY_POS)) {
-			if (_LRF_DIFF_DATA_UNCHANGE_MAX_COUNT >
-			    s_taLRF_CB[nAxis].nNewDataMonitorCount) {
-				naData[nAxis] = s_taLRF_CB[nAxis].nRepValue;
-				goto _LRF_RETURN;
-			}
-		}
-	}
-
-	s_taLRF_CB[nAxis].nRepValue = _nCurrData;
-	s_taLRF_CB[nAxis].nPreDiff = 0;
-	s_taLRF_CB[nAxis].nIsNewRound = 1;
-
-_LRF_RETURN:
-	s_taLRF_CB[nAxis].nPreValue = _nCurrData;
-
-#undef _LRF_DIFF_COUNT_POS
-#undef _LRF_DIFF_COUNT_NEG
-#undef _LRF_DIFF_BOUNDARY_POS
-#undef _LRF_DIFF_BOUNDARY_NEG
-#undef _LRF_DIFF_DATA_UNCHANGE_MAX_COUNT
-}
-#endif				/* END OF #ifdef _STK_SUPPORT_LRF */
-
-#ifdef ONTIM_CALI
-/*****************************************
- *** openFile
- *****************************************/
-static struct file *openFile(char *path, int flag, int mode)
-{
-	struct file *fp = NULL;
-
-	fp = filp_open(path, flag, mode);
-
-	if (IS_ERR(fp) || !fp->f_op) {
-		GSE_LOG("Calibration File filp_open return NULL\n");
-		return NULL;
-	} else {
-		return fp;
-	}
-}
-
-
-/*****************************************
- *** seekFile
-      whence--- SEEK_END/SEEK_CUR/SEEK_SET
- *****************************************/
-static int seekFile(struct file *fp, int offset, int whence)
-{
-	if (fp->f_op && fp->f_op->llseek)
-		return fp->f_op->llseek(fp, (loff_t) offset, whence);
-	else
-		return -1;
-}
-
-/*****************************************
- *** readFile
- *****************************************/
-static int readFile(struct file *fp, char *buf, int readlen)
-{
-	if (fp->f_op && fp->f_op->read)
-		return fp->f_op->read(fp, buf, readlen, &fp->f_pos);
-	else
-		return -1;
-}
-
-/*****************************************
- *** writeFile
- *****************************************/
-static int writeFile(struct file *fp, char *buf, int writelen)
-{
-	if (fp->f_op && fp->f_op->write)
-		return fp->f_op->write(fp, buf, writelen, &fp->f_pos);
-	else
-		return -1;
-}
-
-/*****************************************
- *** closeFile
- *****************************************/
-static int closeFile(struct file *fp)
-{
-	filp_close(fp, NULL);
-	return 0;
-}
-
-/*****************************************
- *** initKernelEnv
- *****************************************/
-static void initKernelEnv(void)
-{
-	oldfs = get_fs();
-	set_fs(KERNEL_DS);
-	GSE_LOG("initKernelEnv\n");
-}
-
-static int stk8baxx_write_cali_file(int raw_data[3])
-{
-#define _WRT_LOG_DATA_BUFFER_SIZE    (GSENSOR_CALI_DATA_LEN)
-
-	int err = 0;
-	char _pszBuffer[_WRT_LOG_DATA_BUFFER_SIZE] = { 0 };
-	int n = 0;
-	struct file *fd_file = NULL;
-	mm_segment_t oldfs;
-
-	oldfs = get_fs();
-	set_fs(KERNEL_DS);
-
-	fd_file = openFile(file_path, O_RDWR | O_CREAT, 0644);
-	if (fd_file == NULL) {
-		GSE_LOG("stk8baxx_write_log_data fail to open\n");
-
-		/* fd_file = openFile(backup_file_path ,O_RDWR,0); */
-		fd_file = openFile(backup_file_path, O_RDWR, 0);
-
-		if (fd_file == NULL) {
-			GSE_LOG("%s:fail to open proinfo file: %s\n", __func__, backup_file_path);
-			set_fs(oldfs);
-			return (-1);
-		}
-		GSE_LOG("Open proinfo file successfully: %s\n", backup_file_path);
-		if (seekFile(fd_file, PROINFO_CALI_DATA_OFFSET, SEEK_SET) < 0) {
-			GSE_LOG("%s:fail to seek proinfo file: %s;\n", __func__,
-				backup_file_path);
-			closeFile(fd_file);
-			set_fs(oldfs);
-			return (-1);
-		}
-		sprintf(_pszBuffer, "STK8BAXX");
-		err = writeFile(fd_file, _pszBuffer, GSENSOR_CALI_NAME_LEN);
-		if (err > 0) {
-			GSE_LOG("name:%s\n", _pszBuffer);
-			memset(_pszBuffer, 0, _WRT_LOG_DATA_BUFFER_SIZE);
-		} else {
-			GSE_LOG("write name error %d\n", err);
-			closeFile(fd_file);
-			set_fs(oldfs);
-			return (-1);
-		}
-	}
-
-	n = sprintf(_pszBuffer, "%d %d %d\n", raw_data[0], raw_data[1], raw_data[2]);
-
-	usleep_range(40000, 60000);
-	err = writeFile(fd_file, _pszBuffer, _WRT_LOG_DATA_BUFFER_SIZE);
-	if (err > 0)
-		GSE_LOG("buf:%s\n", _pszBuffer);
-	else
-		GSE_LOG("write file error %d\n", err);
-
-
-	closeFile(fd_file);
-	set_fs(oldfs);
-
-	return 0;
-}
-
-static int STK8BAXX_SetCaliScaleOfst(struct i2c_client *client, int acc[3]);
-static int STK8BAXX_SetOffset(struct i2c_client *client, char buf[]);
-static s32 stk8baxx_i2c_smbus_write_byte_data(const struct i2c_client *client, u8 command,
-					      u8 value);
-static int STK8BAXX_SetCaliOffset(struct i2c_client *client, int acc_ave[3], u8 offset[3])
-{
-	struct stk8baxx_i2c_data *obj = i2c_get_clientdata(client);
-	int axis = 0;
-	int result = 0;
-
-	result = stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_OFSTCOMP1, CAL_OFST_RST);
-	if (result < 0) {
-		GSE_ERR("write offset fail: %d\n", result);
-		return 0;
-	}
-
-	msleep(24);
-	GSE_LOG("%s: z axis cvt.sign =%d", __func__, obj->cvt.sign[STK8BAXX_AXIS_Z]);
-	if (obj->cvt.sign[STK8BAXX_AXIS_Z] > 0)
-		acc_ave[2] -= STK_LSB_1G;
-	else
-		acc_ave[2] += STK_LSB_1G;
-
-	STK8BAXX_SetCaliScaleOfst(obj->client, acc_ave);
-
-	for (axis = 0; axis < 3; axis++)
-		offset[axis] = -acc_ave[axis];
-	GSE_LOG("%s: New offset for reg:%d,%d,%d\n", __func__, offset[0], offset[1], offset[2]);
-
-	STK8BAXX_SetOffset(obj->client, offset);
-
-	return 0;
-}
-
-#define STABLE_CHECK_SAMPLE_NUM     10
-#define STABLE_CHECK_THRESHOLD      7000000
-#define AUTO_CALI_THRESHOLD_XY      2000
-#define AUTO_CALI_THRESHOLD_Z        2000
-
-static unsigned char stable_sample_cnt;
-static int stable_sample_pow_sum[STABLE_CHECK_SAMPLE_NUM] = { 0 };
-static int stable_sample_sum[3] = { 0 };
-static int data_cali_sum[3] = { 0 };
-
-static int STK8BAXX_auto_cali_condition_confirm(int x, int y, int z, int ave_xyz[3],
-						s16 data_cali[3], int cali_ave_xyz[3])
-{
-	int max = 0, min = 0;
-	int i;
-	int x_ok = 0, y_ok = 0, z_ok = 0;
-
-	stable_sample_pow_sum[stable_sample_cnt] = x * x + y * y + z * z;
-	stable_sample_sum[0] += x;
-	stable_sample_sum[1] += y;
-	stable_sample_sum[2] += z;
-
-	data_cali_sum[0] += data_cali[0];
-	data_cali_sum[1] += data_cali[1];
-	data_cali_sum[2] += data_cali[2];
-
-	stable_sample_cnt++;
-
-	GSE_LOG("---stable_sample_cnt = %d,x=%d,y=%d,z=%d\n", stable_sample_cnt, x, y, z);
-
-	if (stable_sample_cnt < STABLE_CHECK_SAMPLE_NUM)
-		return -1;
-	stable_sample_cnt = 0;
-
-	max = stable_sample_pow_sum[0];
-	min = stable_sample_pow_sum[0];
-	stable_sample_pow_sum[0] = 0;
-	for (i = 1; i < STABLE_CHECK_SAMPLE_NUM; i++) {
-		if (stable_sample_pow_sum[i] > max)
-			max = stable_sample_pow_sum[i];
-		if (stable_sample_pow_sum[i] < min)
-			min = stable_sample_pow_sum[i];
-		stable_sample_pow_sum[i] = 0;
-	}
-	GSE_LOG("---max = %d; min = %d", max, min);
-
-	ave_xyz[0] = stable_sample_sum[0] / STABLE_CHECK_SAMPLE_NUM;
-	stable_sample_sum[0] = 0;
-	ave_xyz[1] = stable_sample_sum[1] / STABLE_CHECK_SAMPLE_NUM;
-	stable_sample_sum[1] = 0;
-	ave_xyz[2] = stable_sample_sum[2] / STABLE_CHECK_SAMPLE_NUM - 9807;
-	stable_sample_sum[2] = 0;
-
-	for (i = 0; i < 3; i++) {
-		if (data_cali_sum[i] >= 0)
-			cali_ave_xyz[i] =
-			    (data_cali_sum[i] +
-			     STABLE_CHECK_SAMPLE_NUM / 2) / STABLE_CHECK_SAMPLE_NUM;
-		else
-			cali_ave_xyz[i] =
-			    (data_cali_sum[i] -
-			     STABLE_CHECK_SAMPLE_NUM / 2) / STABLE_CHECK_SAMPLE_NUM;
-		data_cali_sum[i] = 0;
-	}
-
-	GSE_LOG("ave_x = %d, ave_y = %d, ave_z = %d", ave_xyz[0], ave_xyz[1], ave_xyz[2]);
-	x_ok = (abs(ave_xyz[0]) < AUTO_CALI_THRESHOLD_XY) ? 1 : 0;
-	y_ok = (abs(ave_xyz[1]) < AUTO_CALI_THRESHOLD_XY) ? 1 : 0;
-	z_ok = (abs(abs(ave_xyz[2])) < AUTO_CALI_THRESHOLD_Z) ? 1 : 0;
-
-	if ((abs(max - min) > STABLE_CHECK_THRESHOLD) || ((x_ok + y_ok + z_ok) < 2))
-		return -1;
-
-	return 0;
-}
-
-static void stk8baxx_load_cali(struct i2c_client *client);
-static int STK8BAXX_do_audo_cali(int data[3], s16 data_cali[3])
-{
-	int ret = 0;
-	static int save_count;
-	int cali_data[3] = { 0 };
-	int data_cali_ave[3] = { 0 };
-
-	/* int     xyz[3] = {0}; */
-	u8 offset[3] = { 0 };
-	/* if (save_count >=5) return -1; */
-
-
-	if (STK8BAXX_auto_cali_condition_confirm
-	    (data[0], data[1], data[2], cali_data, data_cali, data_cali_ave) == 0) {
-		STK8BAXX_SetCaliOffset(stk8baxx_i2c_client, data_cali_ave, offset);
-		cali_data[0] = offset[0];
-		cali_data[1] = offset[1];
-		cali_data[2] = offset[2];
-		if (stk8baxx_write_cali_file(cali_data) == 0) {
-			s_CaliLoadEnable = true;
-			s_nIsCaliLoaded = false;
-			stk8baxx_audo_cali_enable = 3;
-			stk8baxx_cali_enable = 0;
-			/* stk8baxx_load_cali(stk8baxx_i2c_client); */
-			save_count = 0;
-		} else if (save_count < 5) {
-			save_count++;
-			ret = -1;
-		} else {
-			GSE_ERR("Save cali file fail  5 time, Disable read cali file!!!\n");
-			s_CaliLoadEnable = false;
-			stk8baxx_cali_enable = 0;
-			stk8baxx_audo_cali_enable = 0;
-			save_count = 0;
-			ret = -1;
-		}
-	}
-	return ret;
-}
-
-static int STK8BAXX_WriteCalibration(struct i2c_client *client, int dat[STK8BAXX_AXES_NUM]);
-/*****************************************
- *** stk8baxx_read_cali_file
- *****************************************/
-static int stk8baxx_read_cali_file(struct i2c_client *client)
-{
-	char cali_data[3] = { 0 };
-	int err = 0;
-	char buf[GSENSOR_CALI_DATA_LEN] = { 0 };
-
-	GSE_LOG("[%s]\n", __func__);
-
-
-	initKernelEnv();
-	fd_file = openFile(file_path, O_RDONLY, 0);
-
-	if (fd_file == NULL) {
-		GSE_LOG("%s:fail to open calibration file: %s\n", __func__, file_path);
-		fd_file = openFile(backup_file_path, O_RDONLY, 0);
-
-		if (fd_file == NULL) {
-			GSE_LOG("%s:fail to open proinfo file: %s\n", __func__, backup_file_path);
-			set_fs(oldfs);
-			return (-1);
-		}
-		GSE_LOG("Open proinfo file successfully: %s\n", backup_file_path);
-		if (seekFile(fd_file, PROINFO_CALI_DATA_OFFSET, SEEK_SET) < 0) {
-			GSE_LOG("%s:fail to seek proinfo file: %s;\n", __func__, backup_file_path);
-			goto read_error;
-		} else {
-			err = readFile(fd_file, buf, GSENSOR_CALI_NAME_LEN);
-			if (err > 0) {
-				if (strncmp(buf, "STK8BAXX", 8)) {
-					GSE_LOG("read name error, name is %s\n", buf);
-					goto read_error;
-				}
-			} else {
-				GSE_LOG("read file error %d\n", err);
-				goto read_error;
-			}
-		}
-	} else
-		GSE_LOG("Open calibration file successfully: %s\n", file_path);
-
-	memset(buf, 0, sizeof(buf));
-	err = readFile(fd_file, buf, sizeof(buf));
-	if (err > 0)
-		GSE_LOG("cali_file: buf:%s\n", buf);
-	else {
-		GSE_LOG("read file error %d\n", err);
-		goto read_error;
-	}
-
-	closeFile(fd_file);
-	set_fs(oldfs);
-
-	if (1 == sscanf(buf, "%d %d %d", (int *)&cali_data[STK8BAXX_AXIS_X],
-	       (int *)&cali_data[STK8BAXX_AXIS_Y], (int *)&cali_data[STK8BAXX_AXIS_Z])) {
-		GSE_LOG("cali_data: %d %d %d\n", cali_data[STK8BAXX_AXIS_X], cali_data[STK8BAXX_AXIS_Y],
-		cali_data[STK8BAXX_AXIS_Z]);
-	}
-	STK8BAXX_SetOffset(client, cali_data);
-	return 0;
-
-read_error:
-	closeFile(fd_file);
-	set_fs(oldfs);
-	return (-1);
-}
-
-/*****************************************
- *** stk8baxx_load_cali
- *****************************************/
-static void stk8baxx_load_cali(struct i2c_client *client)
-{
-	static int read_loop;
-
-	if ((false == s_nIsCaliLoaded) && (s_CaliLoadEnable)) {
-		GSE_LOG("[%s] loading cali file...\n", __func__);
-
-		if (STK8BAXX_RETCODE_SUCCESS == stk8baxx_read_cali_file(client)) {
-			s_nIsCaliLoaded = true;
-			read_loop = 0;
-		} else {
-			read_loop++;
-			if (read_loop > 10)
-				s_nIsCaliLoaded = true;
-			GSE_ERR("loading cali file fail!\n");
-		}
-	}
-}
-
-#endif
-
-static int stk8baxx_hwmsen_read_block(struct i2c_client *client, u8 addr, u8 *data, u8 len)
-{
-	u8 beg = addr;
-	struct i2c_msg msgs[2] = {
-		{
-		 .addr = client->addr,
-		 .flags = 0,
-		 .len = 1,
-		 .buf = &beg},
-		{
-		 .addr = client->addr,
-		 .flags = I2C_M_RD,
-		 .len = len,
-		 .buf = data,
-		 }
-	};
-	int err;
-
-	if (!client)
+/********* Functions *********/
+/**
+ * stk8baxx register write
+ * @brief: Register writing via I2C
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ * @param[in] reg: Register address
+ * @param[in] val: Data, what you want to write.
+ *
+ * @return: Success or fail
+ *          0: Success
+ *          others: Fail
+ */
+static int stk8baxx_reg_write(struct stk8baxx_data *stk, u8 reg, u8 val)
+{   /*because address also occupies one byte, the maximum length for write is 7 bytes*/
+	int err, num; //idx, 
+	char buf[C_I2C_FIFO_SIZE];
+	u8 len = 1;
+	
+	err = 0;
+	mutex_lock(&STK8BA5X_i2c_mutex);
+	if (!stk->client) {
+		mutex_unlock(&STK8BA5X_i2c_mutex);
 		return -EINVAL;
-	else if (len > C_I2C_FIFO_SIZE) {
-		GSE_ERR(" length %d exceeds %d\n", len, C_I2C_FIFO_SIZE);
+	} else if (len >= C_I2C_FIFO_SIZE) {
+		STK_ACC_ERR(" length %d exceeds %d\n", len, C_I2C_FIFO_SIZE);
+		mutex_unlock(&STK8BA5X_i2c_mutex);
 		return -EINVAL;
 	}
 
-	err = i2c_transfer(client->adapter, msgs, sizeof(msgs) / sizeof(msgs[0]));
-	if (err != 2) {
-		GSE_ERR("i2c_transfer error: (%d %p %d) %d\n", addr, data, len, err);
-		err = -EIO;
-	} else {
-		err = 0;	/*no error */
-	}
-	return err;
-}
+	num = 0;
+	buf[num++] = reg;
+	//for (idx = 0; idx < len; idx++)
+	buf[num++] = val;
 
-/*----------------------------------------------------------------------------*/
-static s32 stk8baxx_i2c_smbus_write_byte_data(const struct i2c_client *client, u8 command, u8 value)
-{
-	s32 err;
-	int overall_retry;
-	int tx_retry;
-	u8 databuf[2];
-
-	memset(databuf, 0, sizeof(u8) * 2);
-	databuf[0] = command;
-	databuf[1] = value;
-	for (overall_retry = 0; overall_retry < 3; overall_retry++) {
-		for (tx_retry = 0; tx_retry <= 3; tx_retry++) {
-			err = i2c_master_send(client, databuf, 0x2);
-			if (err > 0)
-				break;
-			usleep_range(9000, 11000);
-		}
-
-		if (tx_retry > 3) {
-			GSE_ERR("i2c transfer error, tx_retry over 3\n");
-			return -EIO;
-		}
-		/* skip read-only CAL_RDY */
-		if (command == STK8BAXX_OFSTCOMP1 || command == STK8BAXX_SWRST)
-			return 0;
-
-		err = i2c_smbus_read_byte_data(client, command);
-		if (err < 0) {
-			GSE_ERR("i2c transfer failed, err=%d\n", err);
-			return STK8BAXX_ERR_I2C;
-		}
-		if ((u8) err == value)
-			return 0;
-	}
-	GSE_ERR("read back error,w=0x%x,r=0x%x\n", value, err);
-	return -EIO;
-}
-
-/*----------------------------------------------------------------------------*/
-
-/*----------------------------------------------------------------------------*/
-#ifdef STK_TUNE
-static void stk_handle_first_en(struct i2c_client *client)
-{
-	struct stk8baxx_i2c_data *obj = i2c_get_clientdata(client);
-	char r_buf[STK_ACC_CALI_FILE_SIZE] = { 0 };
-	char offset[3];
-	char mode;
-	int aa;
-
-	if ((stk_get_file_content(r_buf, STK_ACC_CALI_FILE_SIZE)) == 0) {
-		if (r_buf[0] == STK_ACC_CALI_VER0 && r_buf[1] == STK_ACC_CALI_VER1
-		    && r_buf[STK_ACC_CALI_FILE_SIZE - 1] == STK_ACC_CALI_END) {
-			offset[0] = r_buf[3];
-			offset[1] = r_buf[5];
-			offset[2] = r_buf[7];
-			mode = r_buf[8];
-			STK8BAXX_SetOffset(client, offset);
-
-			obj->stk_tune_offset_record[0] = offset[0];
-			obj->stk_tune_offset_record[1] = offset[1];
-			obj->stk_tune_offset_record[2] = offset[2];
-			GSE_LOG("%s: set offset:%d,%d,%d, mode=%d\n", __func__, offset[0], offset[1],
-			       offset[2], mode);
-			GSE_LOG("%s: variance=%u,%u,%u\n", __func__,
-			       (r_buf[9] << 24 | r_buf[10] << 16 | r_buf[11] << 8 | r_buf[12]),
-			       (r_buf[13] << 24 | r_buf[14] << 16 | r_buf[15] << 8 | r_buf[16]),
-			       (r_buf[17] << 24 | r_buf[18] << 16 | r_buf[19] << 8 | r_buf[20]));
-			atomic_set(&obj->cali_status, mode);
-		} else {
-			GSE_LOG("%s: cali version number error! r_buf=0x%x,0x%x,0x%x,0x%x,0x%x\n",
-			       __func__, r_buf[0], r_buf[1], r_buf[2], r_buf[3], r_buf[4]);
-			for (aa = 0; aa < STK_ACC_CALI_FILE_SIZE; aa++)
-				GSE_LOG("%s:buf[%d]=%x\n", __func__, aa, r_buf[aa]);
-			/* return -EINVAL; */
-		}
-	} else if (obj->stk_tune_offset_record[0] != 0 || obj->stk_tune_offset_record[1] != 0
-		   || obj->stk_tune_offset_record[2] != 0) {
-		STK8BAXX_SetOffset(client, obj->stk_tune_offset_record);
-		obj->stk_tune_done = 1;
-		atomic_set(&obj->cali_status, STK_K_SUCCESS_TUNE);
-		GSE_LOG("%s: set offset:%d,%d,%d\n", __func__, obj->stk_tune_offset_record[0],
-		       obj->stk_tune_offset_record[1], obj->stk_tune_offset_record[2]);
-	} else {
-		offset[0] = offset[1] = offset[2] = 0;
-		stk8baxx_store_in_file(offset, STK_K_NO_CALI, NULL);
-		atomic_set(&obj->cali_status, STK_K_NO_CALI);
-	}
-	GSE_LOG("%s: finish, cali_status = 0x%x\n", __func__,
-	       atomic_read(&obj->cali_status));
-}
-#endif
-/*----------------------------------------------------------------------------*/
-static int STK8BAXX_SetDataResolution(struct i2c_client *client, u8 dataresolution)
-{
-	int err;
-	u8 databuf;
-	int res = 0;
-	u8 reso = 0;
-	struct stk8baxx_i2c_data *obj = i2c_get_clientdata(client);
-
-	GSE_LOG("set resolution  dataresolution= %d!\n", dataresolution);
-
-	switch (dataresolution) {
-	case STK8BAXX_RNG_2G:
-		databuf = STK8BAXX_RNG_2G;
-		reso = 0;
-		break;
-	case STK8BAXX_RNG_4G:
-		databuf = STK8BAXX_RNG_4G;
-		reso = 1;
-		break;
-	case STK8BAXX_RNG_8G:
-		databuf = STK8BAXX_RNG_8G;
-		reso = 2;
-		break;
-	case STK8BAXX_RNG_16G:
-		databuf = STK8BAXX_RNG_16G;
-		reso = 3;
-		break;
-	default:
-		databuf = STK8BAXX_RNG_2G;
-		GSE_LOG("%s: unknown range, set as STK8BAXX_RNG_2G\n", __func__);
-	}
-
-	if (reso < sizeof(stk8baxx_data_resolution) / sizeof(stk8baxx_data_resolution[0])) {
-		obj->reso = &stk8baxx_data_resolution[reso];
-		GSE_LOG("reso=%x!! OK\n", reso);
-		err = 0;
-	} else {
-		GSE_ERR("choose sensitivity  fail!!\n");
-		err = -EINVAL;
-	}
-	if (!obj->sensor_power) {
-		err =
-		    stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_POWMODE,
-						       STK8BAXX_MD_NORMAL);
-		if (err < 0) {
-			GSE_LOG("set power mode failed!\n");
-			return STK8BAXX_ERR_I2C;
-		}
-	}
-	res = stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_RANGESEL, databuf);
-	if (res < 0)
-		err = STK8BAXX_ERR_I2C;
-	if (!obj->sensor_power) {
-		err =
-		    stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_POWMODE,
-						       STK8BAXX_MD_SUSPEND);
-		if (err < 0) {
-			GSE_LOG("set power mode failed!\n");
-			return STK8BAXX_ERR_I2C;
-		}
-
-	}
-	udelay(500);
-
-	return err;
-}
-
-static int STK8BAXX_SetCaliScaleOfst(struct i2c_client *client, int acc[3])
-{
-	/* struct stk8baxx_i2c_data *obj = i2c_get_clientdata(client); */
-	int result;
-	int xyz_sensitivity = 256;
-	int axis;
-
-	result = i2c_smbus_read_byte_data(client, STK8BAXX_RANGESEL);
-	if (result < 0) {
-		GSE_ERR("%s: failed to read acc data, error=%d\n", __func__, result);
-		return result;
-	}
-
-	result &= STK8BAXX_RANGE_MASK;
-	GSE_LOG("%s: range=0x%x\n", __func__, result);
-#ifdef CONFIG_SENSORS_STK8BA53
-	switch (result) {
-	case STK8BAXX_RNG_2G:
-		xyz_sensitivity = stk8baxx_data_resolution[0].sensitivity;
-		/* xyz_sensitivity = 1024; */
-		break;
-	case STK8BAXX_RNG_4G:
-		xyz_sensitivity = stk8baxx_data_resolution[1].sensitivity;
-		/* xyz_sensitivity = 512; */
-		break;
-	case STK8BAXX_RNG_8G:
-		xyz_sensitivity = stk8baxx_data_resolution[2].sensitivity;
-		/* xyz_sensitivity = 256; */
-		break;
-	case STK8BAXX_RNG_16G:
-		xyz_sensitivity = stk8baxx_data_resolution[3].sensitivity;
-		/* xyz_sensitivity = 128; */
-		break;
-	default:
-		xyz_sensitivity = stk8baxx_data_resolution[0].sensitivity;
-		/* xyz_sensitivity = 512; */
-	}
-#else
-	switch (result) {
-	case STK8BAXX_RNG_2G:
-		xyz_sensitivity = stk8baxx_data_resolution[0].sensitivity;
-		/* xyz_sensitivity = 256; */
-		break;
-	case STK8BAXX_RNG_4G:
-		xyz_sensitivity = stk8baxx_data_resolution[1].sensitivity;
-		/* xyz_sensitivity = 128; */
-		break;
-	case STK8BAXX_RNG_8G:
-		xyz_sensitivity = stk8baxx_data_resolution[2].sensitivity;
-		/* xyz_sensitivity = 64; */
-		break;
-	case STK8BAXX_RNG_16G:
-		xyz_sensitivity = stk8baxx_data_resolution[3].sensitivity;
-		/* xyz_sensitivity = 32; */
-		break;
-	default:
-		xyz_sensitivity = stk8baxx_data_resolution[0].sensitivity;
-		/* xyz_sensitivity = 256; */
-	}
-#endif
-
-	/* offset sensitivity is fixed to 128 LSB/g for all range setting */
-	for (axis = 0; axis < 3; axis++)
-		acc[axis] = acc[axis] * stk8baxx_offset_resolution.sensitivity / xyz_sensitivity;
-	return 0;
-}
-
-#ifdef STK_TUNE
-static void STK8BAXX_ResetPara(struct stk8baxx_i2c_data *obj)
-{
-	int ii;
-
-	for (ii = 0; ii < 3; ii++) {
-		obj->stk_tune_sum[ii] = 0;
-		obj->stk_tune_min[ii] = 4096;
-		obj->stk_tune_max[ii] = -4096;
-		obj->stk_tune_square_sum[ii] = 0LL;
-	}
-}
-
-/*----------------------------------------------------------------------------*/
-static void STK8BAXX_Tune(struct i2c_client *client, s16 acc[])
-{
-	struct stk8baxx_i2c_data *obj = i2c_get_clientdata(client);
-	int ii;
-	char offset[3];
-	const s64 var_enlarge_scale = 64;
-	u32 variance[3];
-	s64 s64_temp;
-
-	if (obj->stk_tune_done != 0)
-		return;
-
-	if (atomic_read(&obj->event_since_en) >= STK_TUNE_DELAY) {
-		if ((abs(acc[0]) <= STK_TUNE_XYOFFSET) && (abs(acc[1]) <= STK_TUNE_XYOFFSET)
-		    && (abs(abs(acc[2]) - obj->reso->sensitivity) <= STK_TUNE_ZOFFSET))
-			obj->stk_tune_index++;
-		else
-			obj->stk_tune_index = 0;
-
-		if (obj->stk_tune_index == 0)
-			STK8BAXX_ResetPara(obj);
-		else {
-			for (ii = 0; ii < 3; ii++) {
-				obj->stk_tune_sum[ii] += acc[ii];
-				obj->stk_tune_square_sum[ii] += acc[ii] * acc[ii];
-				if (acc[ii] > obj->stk_tune_max[ii])
-					obj->stk_tune_max[ii] = acc[ii];
-				if (acc[ii] < obj->stk_tune_min[ii])
-					obj->stk_tune_min[ii] = acc[ii];
-			}
-		}
-
-		if (obj->stk_tune_index == STK_TUNE_NUM) {
-			for (ii = 0; ii < 3; ii++) {
-				if ((obj->stk_tune_max[ii] - obj->stk_tune_min[ii]) >
-				    STK_TUNE_NOISE) {
-					obj->stk_tune_index = 0;
-					STK8BAXX_ResetPara(obj);
-					return;
-				}
-			}
-
-			obj->stk_tune_offset[0] = (obj->stk_tune_sum[0] / STK_TUNE_NUM);
-			obj->stk_tune_offset[1] = (obj->stk_tune_sum[1] / STK_TUNE_NUM);
-			if (acc[2] > 0)
-				obj->stk_tune_offset[2] =
-				    (obj->stk_tune_sum[2] / STK_TUNE_NUM - obj->reso->sensitivity);
-			else
-				obj->stk_tune_offset[2] =
-				    (obj->stk_tune_sum[2] / STK_TUNE_NUM + obj->reso->sensitivity);
-
-			STK8BAXX_SetCaliScaleOfst(client, obj->stk_tune_offset);
-
-			for (ii = 0; ii < 3; ii++) {
-				offset[ii] = (u8) (-obj->stk_tune_offset[ii]);
-				obj->stk_tune_offset_record[ii] = offset[ii];
-
-				obj->stk_tune_square_sum[ii] *=
-				    var_enlarge_scale * var_enlarge_scale;
-				s64_temp = obj->stk_tune_sum[ii] * var_enlarge_scale;
-				obj->stk_tune_square_sum[ii] =
-				    div64_long(obj->stk_tune_square_sum[ii], STK_TUNE_NUM - 1);
-				s64_temp = s64_temp * s64_temp;
-				s64_temp = div64_long(s64_temp, STK_TUNE_NUM);
-				s64_temp = div64_long(s64_temp, STK_TUNE_NUM - 1);
-				variance[ii] = (u32) (obj->stk_tune_square_sum[ii] - s64_temp);
-			}
-			STK8BAXX_SetOffset(client, offset);
-			stk8baxx_store_in_file(offset, STK_K_SUCCESS_TUNE, variance);
-			obj->stk_tune_done = 1;
-			atomic_set(&obj->cali_status, STK_K_SUCCESS_TUNE);
-			atomic_set(&obj->event_since_en, 0);
-			GSE_LOG("%s:TUNE done, %d,%d,%d\n", __func__,
-			       offset[0], offset[1], offset[2]);
-		}
-	}
-
-}
-#endif
-/*----------------------------------------------------------------------------*/
-
-static void STK8BAXX_SignConv(s16 acc_data[], u8 acc_reg_data[])
-{
-	/*int i; */
-
-#ifdef CONFIG_SENSORS_STK8BA53
-	acc_data[STK8BAXX_AXIS_X] =
-	    acc_reg_data[STK8BAXX_AXIS_X * 2 + 1] << 8 | acc_reg_data[STK8BAXX_AXIS_X * 2];
-	acc_data[STK8BAXX_AXIS_X] >>= 4;
-	acc_data[STK8BAXX_AXIS_Y] =
-	    acc_reg_data[STK8BAXX_AXIS_Y * 2 + 1] << 8 | acc_reg_data[STK8BAXX_AXIS_Y * 2];
-	acc_data[STK8BAXX_AXIS_Y] >>= 4;
-	acc_data[STK8BAXX_AXIS_Z] =
-	    acc_reg_data[STK8BAXX_AXIS_Z * 2 + 1] << 8 | acc_reg_data[STK8BAXX_AXIS_Z * 2];
-	acc_data[STK8BAXX_AXIS_Z] >>= 4;
-#else
-	acc_data[STK8BAXX_AXIS_X] =
-	    acc_reg_data[STK8BAXX_AXIS_X * 2 + 1] << 8 | acc_reg_data[STK8BAXX_AXIS_X * 2];
-	acc_data[STK8BAXX_AXIS_X] >>= 6;
-	acc_data[STK8BAXX_AXIS_Y] =
-	    acc_reg_data[STK8BAXX_AXIS_Y * 2 + 1] << 8 | acc_reg_data[STK8BAXX_AXIS_Y * 2];
-	acc_data[STK8BAXX_AXIS_Y] >>= 6;
-	acc_data[STK8BAXX_AXIS_Z] =
-	    acc_reg_data[STK8BAXX_AXIS_Z * 2 + 1] << 8 | acc_reg_data[STK8BAXX_AXIS_Z * 2];
-	acc_data[STK8BAXX_AXIS_Z] >>= 6;
-#endif
-
-}
-
-#ifndef STK_CHECK_CODE
-static int STK8BAXX_CheckCode(s16 acc[])
-{
-	return 0;
-}
-#endif
-
-static int STK8BAXX_CheckReading(struct i2c_client *client, s16 acc[], bool clear)
-{
-	struct stk8baxx_i2c_data *obj = i2c_get_clientdata(client);
-	static int check_result;
-	static int event_no;
-	const int verifing[] = { -512, 511 };
-
-	if (event_no > 20)
-		return 0;
-
-	if (acc[0] == verifing[0] || acc[0] == verifing[1] || acc[1] == verifing[0]
-	    || acc[1] == verifing[1] || acc[2] == verifing[0] || acc[2] == verifing[1]) {
-		/* GSE_LOG("%s: acc:%o,%o,%o\n", __func__, acc[0], acc[1], acc[2]); */
-		GSE_LOG("%s: acc:%o,%o,%o\n", __func__, acc[0], acc[1], acc[2]);
-		check_result++;
-	}
-
-	if (clear) {
-		if (check_result >= 3) {
-			if (acc[0] != verifing[0] && acc[0] != verifing[1] && acc[1] != verifing[0]
-			    && acc[1] != verifing[1])
-				atomic_set(&obj->event_since_en_limit,
-					   STK_EVENT_SINCE_EN_LIMIT_DEF + 6);
-			else
-				atomic_set(&obj->event_since_en_limit, 10000);
-
-			/* GSE_LOG("%s: incorrect reading\n", __func__); */
-			GSE_LOG("%s: incorrect reading\n", __func__);
-			/* check_result = 0; */
-			return 1;
-		}
-		check_result = 0;
-	}
-	event_no++;
-	return 0;
-}
-
-static int STK8BAXX_ReadData(struct i2c_client *client, s16 data[STK8BAXX_AXES_NUM])
-{
-	struct stk8baxx_i2c_data *obj = i2c_get_clientdata(client);
-	int result;
-	u8 acc_reg[6];
-#ifdef STK_ZG_FILTER
-	s16 zero_fir = 0;
-#endif
-	int k_status = atomic_read(&obj->cali_status);
-	s16 acc_xyz[3] = { 0 };
-
-	result = stk8baxx_hwmsen_read_block(client, STK8BAXX_XOUT1, acc_reg, 6);
-	if (result < 0) {
-		GSE_LOG("%s: failed to read acc data, error=%d\n", __func__, result);
-		return result;
-	}
-
-	STK8BAXX_SignConv(data, acc_reg);
-	acc_xyz[STK8BAXX_AXIS_X] = data[STK8BAXX_AXIS_X];
-	acc_xyz[STK8BAXX_AXIS_Y] = data[STK8BAXX_AXIS_Y];
-	acc_xyz[STK8BAXX_AXIS_Z] = data[STK8BAXX_AXIS_Z];
-
-	if (atomic_read(&obj->event_since_en) == (STK_EVENT_SINCE_EN_LIMIT_DEF + 1)
-	    || atomic_read(&obj->event_since_en) == (STK_EVENT_SINCE_EN_LIMIT_DEF + 2))
-		STK8BAXX_CheckReading(client, acc_xyz, false);
-	else if (atomic_read(&obj->event_since_en) == (STK_EVENT_SINCE_EN_LIMIT_DEF + 3))
-		STK8BAXX_CheckReading(client, acc_xyz, true);
-	else if (atomic_read(&obj->event_since_en_limit) == (STK_EVENT_SINCE_EN_LIMIT_DEF + 6))
-		STK8BAXX_CheckCode(acc_xyz);
-
-	data[STK8BAXX_AXIS_X] = acc_xyz[STK8BAXX_AXIS_X];
-	data[STK8BAXX_AXIS_Y] = acc_xyz[STK8BAXX_AXIS_Y];
-	data[STK8BAXX_AXIS_Z] = acc_xyz[STK8BAXX_AXIS_Z];
-
-	if (k_status == STK_K_RUNNING)
-		return 0;
-#ifdef STK_TUNE
-	if ((k_status & 0xF0) != 0) {
-		acc_xyz[STK8BAXX_AXIS_X] = data[STK8BAXX_AXIS_X];
-		acc_xyz[STK8BAXX_AXIS_Y] = data[STK8BAXX_AXIS_Y];
-		acc_xyz[STK8BAXX_AXIS_Z] = data[STK8BAXX_AXIS_Z];
-		STK8BAXX_Tune(client, acc_xyz);
-		data[STK8BAXX_AXIS_X] = acc_xyz[STK8BAXX_AXIS_X];
-		data[STK8BAXX_AXIS_Y] = acc_xyz[STK8BAXX_AXIS_Y];
-		data[STK8BAXX_AXIS_Z] = acc_xyz[STK8BAXX_AXIS_Z];
-	}
-#endif
-#ifdef CONFIG_STK8BAXX_LOWPASS
-	if (atomic_read(&obj->filter)) {
-		if (atomic_read(&obj->fir_en) && !atomic_read(&obj->suspend)) {
-			int idx, firlen = atomic_read(&obj->firlen);
-
-			if (obj->fir.num < firlen) {
-				obj->fir.raw[obj->fir.num][STK8BAXX_AXIS_X] = data[STK8BAXX_AXIS_X];
-				obj->fir.raw[obj->fir.num][STK8BAXX_AXIS_Y] = data[STK8BAXX_AXIS_Y];
-				obj->fir.raw[obj->fir.num][STK8BAXX_AXIS_Z] = data[STK8BAXX_AXIS_Z];
-				obj->fir.sum[STK8BAXX_AXIS_X] += data[STK8BAXX_AXIS_X];
-				obj->fir.sum[STK8BAXX_AXIS_Y] += data[STK8BAXX_AXIS_Y];
-				obj->fir.sum[STK8BAXX_AXIS_Z] += data[STK8BAXX_AXIS_Z];
-				if (atomic_read(&obj->trace) & ADX_TRC_FILTER) {
-					GSE_LOG("add [%2d] [%5d %5d %5d] => [%5d %5d %5d]\n",
-						obj->fir.num,
-						obj->fir.raw[obj->fir.num][STK8BAXX_AXIS_X],
-						obj->fir.raw[obj->fir.num][STK8BAXX_AXIS_Y],
-						obj->fir.raw[obj->fir.num][STK8BAXX_AXIS_Z],
-						obj->fir.sum[STK8BAXX_AXIS_X],
-						obj->fir.sum[STK8BAXX_AXIS_Y],
-						obj->fir.sum[STK8BAXX_AXIS_Z]);
-				}
-				obj->fir.num++;
-				obj->fir.idx++;
-			} else {
-				idx = obj->fir.idx % firlen;
-				obj->fir.sum[STK8BAXX_AXIS_X] -= obj->fir.raw[idx][STK8BAXX_AXIS_X];
-				obj->fir.sum[STK8BAXX_AXIS_Y] -= obj->fir.raw[idx][STK8BAXX_AXIS_Y];
-				obj->fir.sum[STK8BAXX_AXIS_Z] -= obj->fir.raw[idx][STK8BAXX_AXIS_Z];
-				obj->fir.raw[idx][STK8BAXX_AXIS_X] = data[STK8BAXX_AXIS_X];
-				obj->fir.raw[idx][STK8BAXX_AXIS_Y] = data[STK8BAXX_AXIS_Y];
-				obj->fir.raw[idx][STK8BAXX_AXIS_Z] = data[STK8BAXX_AXIS_Z];
-				obj->fir.sum[STK8BAXX_AXIS_X] += data[STK8BAXX_AXIS_X];
-				obj->fir.sum[STK8BAXX_AXIS_Y] += data[STK8BAXX_AXIS_Y];
-				obj->fir.sum[STK8BAXX_AXIS_Z] += data[STK8BAXX_AXIS_Z];
-				obj->fir.idx++;
-
-				data[STK8BAXX_AXIS_X] = obj->fir.sum[STK8BAXX_AXIS_X] / firlen;
-				data[STK8BAXX_AXIS_Y] = obj->fir.sum[STK8BAXX_AXIS_Y] / firlen;
-				data[STK8BAXX_AXIS_Z] = obj->fir.sum[STK8BAXX_AXIS_Z] / firlen;
-				if (atomic_read(&obj->trace) & ADX_TRC_FILTER) {
-					GSE_LOG
-					    ("add [%2d] [%5d %5d %5d] => [%5d %5d %5d] : [%5d %5d %5d]\n",
-					     idx, obj->fir.raw[idx][STK8BAXX_AXIS_X],
-					     obj->fir.raw[idx][STK8BAXX_AXIS_Y],
-					     obj->fir.raw[idx][STK8BAXX_AXIS_Z],
-					     obj->fir.sum[STK8BAXX_AXIS_X],
-					     obj->fir.sum[STK8BAXX_AXIS_Y],
-					     obj->fir.sum[STK8BAXX_AXIS_Z], data[STK8BAXX_AXIS_X],
-					     data[STK8BAXX_AXIS_Y], data[STK8BAXX_AXIS_Z]);
-				}
-			}
-		}
-	}
-#endif
-#ifdef STK_ZG_FILTER
-	if (abs(data[STK8BAXX_AXIS_X]) <= STK_ZG_COUNT)
-		data[STK8BAXX_AXIS_X] *= zero_fir;
-	if (abs(data[STK8BAXX_AXIS_Y]) <= STK_ZG_COUNT)
-		data[STK8BAXX_AXIS_Y] *= zero_fir;
-	if (abs(data[STK8BAXX_AXIS_Z]) <= STK_ZG_COUNT)
-		data[STK8BAXX_AXIS_Z] *= zero_fir;
-#endif
-#ifdef _STK_SUPPORT_LRF_
-	_STK_LowResFilter(STK_AXIS_X, data);
-	_STK_LowResFilter(STK_AXIS_Y, data);
-	_STK_LowResFilter(STK_AXIS_Z, data);
-
-#endif
-	if (atomic_read(&obj->trace) & ADX_TRC_RAWDATA) {
-		GSE_LOG("raw [%5d %5d %5d]\n", data[STK8BAXX_AXIS_X], data[STK8BAXX_AXIS_Y],
-			data[STK8BAXX_AXIS_Z]);
-	}
-	return 0;
-}
-
-/*----------------------------------------------------------------------------*/
-static int STK8BAXX_SetOffset(struct i2c_client *client, char buf[])
-{
-	struct stk8baxx_i2c_data *obj = i2c_get_clientdata(client);
-	int err = 0;
-
-	if (!obj->sensor_power) {
-		err =
-		    stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_POWMODE,
-						       STK8BAXX_MD_NORMAL);
-		if (err < 0) {
-			GSE_LOG("set power mode failed!\n");
-			return STK8BAXX_ERR_I2C;
-		}
-	}
-
-	err = stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_OFSTFILTX, buf[0]);
+	err = i2c_master_send(stk->client, buf, num);
 	if (err < 0) {
-		GSE_ERR("write offset fail: %d\n", err);
-		return err;
-	}
-	err = stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_OFSTFILTY, buf[1]);
-	if (err < 0) {
-		GSE_ERR("write offset fail: %d\n", err);
-		return err;
-	}
-	err = stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_OFSTFILTZ, buf[2]);
-	if (err < 0) {
-		GSE_ERR("write offset fail: %d\n", err);
-		return err;
-	}
-	if (!obj->sensor_power) {
-		err =
-		    stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_POWMODE,
-						       STK8BAXX_MD_SUSPEND);
-		if (err < 0) {
-			GSE_LOG("set power mode failed!\n");
-			return STK8BAXX_ERR_I2C;
-		}
-
-	}
-	usleep_range(11000, 13000);
-	return 0;
-}
-
-/*----------------------------------------------------------------------------*/
-static int STK8BAXX_ReadOffset(struct i2c_client *client, s8 ofs[STK8BAXX_AXES_NUM])
-{
-	struct stk8baxx_i2c_data *obj = i2c_get_clientdata(client);
-	int err;
-
-	GSE_ERR("read offset+:\n");
-
-	if (!obj->sensor_power) {
-		err =
-		    stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_POWMODE,
-						       STK8BAXX_MD_NORMAL);
-		if (err < 0) {
-			GSE_LOG("set power mode failed!\n");
-			return STK8BAXX_ERR_I2C;
-		}
-	}
-
-	err = stk8baxx_hwmsen_read_block(client, STK8BAXX_OFSTFILTX, ofs, 3);
-	if (err < 0) {
-		GSE_LOG("%s: failed to read acc data, error=%d\n", __func__, err);
-		return err;
-	}
-
-	if (!obj->sensor_power) {
-		err =
-		    stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_POWMODE,
-						       STK8BAXX_MD_SUSPEND);
-		if (err < 0) {
-			GSE_LOG("set power mode failed!\n");
-			return STK8BAXX_ERR_I2C;
-		}
-
-	}
-
-	return err;
-}
-
-/*---------------------------------------------------------------------------*/
-static int STK8BAXX_SetPowerMode(struct i2c_client *client, bool enable)
-{
-	u8 databuf;
-	int res = 0;
-	struct stk8baxx_i2c_data *obj = i2c_get_clientdata(client);
-	int k_status = atomic_read(&obj->cali_status);
-
-	GSE_FUN();
-	GSE_LOG("%s, %d\n", __func__, __LINE__);
-	if (enable == obj->sensor_power) {
-		GSE_LOG("Sensor power status need not to be set again!!!\n");
-		return STK8BAXX_SUCCESS;
-	}
-
-	if ((atomic_read(&obj->suspend) == 1) && (enable == true)) {
-		obj->re_enable = 1;
-		GSE_LOG("IN suspend status, Sensor power status need not to be set!!!\n");
-		return STK8BAXX_SUCCESS;
-	}
-
-	if (!atomic_read(&obj->suspend) && obj->first_enable && k_status != STK_K_RUNNING) {
-		obj->first_enable = false;
-#ifdef STK_TUNE
-		stk_handle_first_en(client);
-#endif
-	}
-	if (enable == true) {
-#ifdef STK_TUNE
-		res =
-		    stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_OFSTFILTX,
-						       obj->stk_tune_offset_record[0]);
-		if (res < 0) {
-			GSE_ERR("write offset fail: %d\n", res);
-			/* return res; */
-		}
-		res =
-		    stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_OFSTFILTY,
-						       obj->stk_tune_offset_record[1]);
-		if (res < 0) {
-			GSE_ERR("write offset fail: %d\n", res);
-			/* return res; */
-		}
-		res =
-		    stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_OFSTFILTZ,
-						       obj->stk_tune_offset_record[2]);
-		if (res < 0) {
-			GSE_ERR("write offset fail: %d\n", res);
-			/* return res; */
-		}
-		GSE_LOG("%s:write offset[0] = %d, offset[1] = %d, offset[2] = %d\n", __func__,
-		       obj->stk_tune_offset_record[0], obj->stk_tune_offset_record[1],
-		       obj->stk_tune_offset_record[2]);
-#endif
-		atomic_set(&obj->event_since_en, 0);
-		databuf = STK8BAXX_MD_NORMAL;
-#ifdef STK_TUNE
-		if ((k_status & 0xF0) != 0 && obj->stk_tune_done == 0) {
-			obj->stk_tune_index = 0;
-			STK8BAXX_ResetPara(obj);
-		}
-#endif
-	} else {
-		databuf = STK8BAXX_MD_SUSPEND;
-	}
-	res = stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_POWMODE, databuf);
-	if (res < 0) {
-		GSE_LOG("set power mode failed!\n");
-		return STK8BAXX_ERR_I2C;
-	} else if (atomic_read(&obj->trace) & ADX_TRC_INFO) {
-		GSE_LOG("set power mode ok %d!\n", databuf);
-	}
-	udelay(500);
-
-	obj->sensor_power = enable;
-	sensor_power = enable;
-
-	return STK8BAXX_SUCCESS;
-
-}
-
-/*----------------------------------------------------------------------------*/
-static int STK8BAXX_ResetCalibration(struct i2c_client *client)
-{
-	struct stk8baxx_i2c_data *obj = i2c_get_clientdata(client);
-	/* s8 ofs[STK8BAXX_AXES_NUM] = {0x00, 0x00, 0x00}; */
-	int err;
-	/* bool old_sensorpowmode = obj->sensor_power; */
-
-	if (!obj->sensor_power) {
-		err =
-		    stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_POWMODE,
-						       STK8BAXX_MD_NORMAL);
-		if (err < 0) {
-			GSE_LOG("set power mode failed!\n");
-			return STK8BAXX_ERR_I2C;
-		}
-	}
-	/* STK8BAXX_SetPowerMode(obj->client,false); */
-	err = stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_OFSTFILTX, 0);
-	if (err < 0) {
-		GSE_ERR("write offset fail: %d\n", err);
-		return err;
-	}
-	err = stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_OFSTFILTY, 0);
-	if (err < 0) {
-		GSE_ERR("write offset fail: %d\n", err);
-		return err;
-	}
-	err = stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_OFSTFILTZ, 0);
-	if (err < 0) {
-		GSE_ERR("write offset fail: %d\n", err);
-		return err;
-	}
-	/* if(old_sensorpowmode == true) */
-	/* STK8BAXX_SetPowerMode(obj->client,true); */
-	memset(obj->cali_sw, 0x00, sizeof(obj->cali_sw));
-	if (!obj->sensor_power) {
-		err =
-		    stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_POWMODE,
-						       STK8BAXX_MD_SUSPEND);
-		if (err < 0) {
-			GSE_LOG("set power mode failed!\n");
-			return STK8BAXX_ERR_I2C;
-		}
-	}
-	usleep_range(11000, 13000);
-	return err;
-}
-
-/*----------------------------------------------------------------------------*/
-static int STK8BAXX_ReadCalibration(struct i2c_client *client, int dat[STK8BAXX_AXES_NUM])
-{
-	struct stk8baxx_i2c_data *obj = i2c_get_clientdata(client);
-	int err;
-	int mul;
-
-	GSE_LOG("%s:before stk8ba50_readoffset\n", __func__);
-	err = STK8BAXX_ReadOffset(client, obj->offset);
-	if (err) {
-		GSE_ERR("read offset fail, %d\n", err);
-		return err;
-	}
-	if (stk8baxx_offset_resolution.sensitivity > obj->reso->sensitivity) {
-		mul = stk8baxx_offset_resolution.sensitivity / obj->reso->sensitivity;
-		dat[obj->cvt.map[STK8BAXX_AXIS_X]] =
-		    obj->cvt.sign[STK8BAXX_AXIS_X] * (obj->offset[STK8BAXX_AXIS_X] / mul);
-		dat[obj->cvt.map[STK8BAXX_AXIS_Y]] =
-		    obj->cvt.sign[STK8BAXX_AXIS_Y] * (obj->offset[STK8BAXX_AXIS_Y] / mul);
-		dat[obj->cvt.map[STK8BAXX_AXIS_Z]] =
-		    obj->cvt.sign[STK8BAXX_AXIS_Z] * (obj->offset[STK8BAXX_AXIS_Z] / mul);
-	} else {
-		mul = obj->reso->sensitivity / stk8baxx_offset_resolution.sensitivity;
-		dat[obj->cvt.map[STK8BAXX_AXIS_X]] =
-		    obj->cvt.sign[STK8BAXX_AXIS_X] * (obj->offset[STK8BAXX_AXIS_X] * mul);
-		dat[obj->cvt.map[STK8BAXX_AXIS_Y]] =
-		    obj->cvt.sign[STK8BAXX_AXIS_Y] * (obj->offset[STK8BAXX_AXIS_Y] * mul);
-		dat[obj->cvt.map[STK8BAXX_AXIS_Z]] =
-		    obj->cvt.sign[STK8BAXX_AXIS_Z] * (obj->offset[STK8BAXX_AXIS_Z] * mul);
-	}
-	GSE_LOG("read cali offX=%x ,offY=%x ,offZ=%x\n", obj->offset[STK8BAXX_AXIS_X],
-		obj->offset[STK8BAXX_AXIS_Y], obj->offset[STK8BAXX_AXIS_Z]);
-	return 0;
-}
-
-/*----------------------------------------------------------------------------*/
-static int STK8BAXX_ReadCalibrationEx(struct i2c_client *client, int act[STK8BAXX_AXES_NUM],
-				      int raw[STK8BAXX_AXES_NUM])
-{
-	/*raw: the raw calibration data; act: the actual calibration data */
-	struct stk8baxx_i2c_data *obj = i2c_get_clientdata(client);
-	int err;
-	int mul;
-
-	GSE_LOG("%s:before stk8ba50_readoffset\n", __func__);
-	err = STK8BAXX_ReadOffset(client, obj->offset);
-	if (err) {
-		GSE_ERR("read offset fail, %d\n", err);
-		return err;
-	}
-
-	if (stk8baxx_offset_resolution.sensitivity > obj->reso->sensitivity) {
-		mul = stk8baxx_offset_resolution.sensitivity / obj->reso->sensitivity;
-		raw[STK8BAXX_AXIS_X] =
-		    obj->offset[STK8BAXX_AXIS_X] / mul + obj->cali_sw[STK8BAXX_AXIS_X];
-		raw[STK8BAXX_AXIS_Y] =
-		    obj->offset[STK8BAXX_AXIS_Y] / mul + obj->cali_sw[STK8BAXX_AXIS_Y];
-		raw[STK8BAXX_AXIS_Z] =
-		    obj->offset[STK8BAXX_AXIS_Z] / mul + obj->cali_sw[STK8BAXX_AXIS_Z];
-	} else {
-		mul = obj->reso->sensitivity / stk8baxx_offset_resolution.sensitivity;
-		raw[STK8BAXX_AXIS_X] =
-		    obj->offset[STK8BAXX_AXIS_X] * mul + obj->cali_sw[STK8BAXX_AXIS_X];
-		raw[STK8BAXX_AXIS_Y] =
-		    obj->offset[STK8BAXX_AXIS_Y] * mul + obj->cali_sw[STK8BAXX_AXIS_Y];
-		raw[STK8BAXX_AXIS_Z] =
-		    obj->offset[STK8BAXX_AXIS_Z] * mul + obj->cali_sw[STK8BAXX_AXIS_Z];
-	}
-
-	act[obj->cvt.map[STK8BAXX_AXIS_X]] = obj->cvt.sign[STK8BAXX_AXIS_X] * raw[STK8BAXX_AXIS_X];
-	act[obj->cvt.map[STK8BAXX_AXIS_Y]] = obj->cvt.sign[STK8BAXX_AXIS_Y] * raw[STK8BAXX_AXIS_Y];
-	act[obj->cvt.map[STK8BAXX_AXIS_Z]] = obj->cvt.sign[STK8BAXX_AXIS_Z] * raw[STK8BAXX_AXIS_Z];
-
-	return 0;
-}
-
-/*----------------------------------------------------------------------------*/
-static int STK8BAXX_SetBWSEL(struct i2c_client *client, u8 dataformat)
-{
-	struct stk8baxx_i2c_data *obj = i2c_get_clientdata(client);
-	int res = 0, err;
-
-	if (!obj->sensor_power) {
-		err =
-		    stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_POWMODE,
-						       STK8BAXX_MD_NORMAL);
-		if (err < 0) {
-			GSE_LOG("set power mode failed!\n");
-			return STK8BAXX_ERR_I2C;
-		}
-	}
-
-	res = stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_BWSEL, STK8BAXX_INIT_ODR);
-	if (res < 0)
-		return STK8BAXX_ERR_I2C;
-	if (!obj->sensor_power) {
-		err =
-		    stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_POWMODE,
-						       STK8BAXX_MD_SUSPEND);
-		if (err < 0) {
-			GSE_LOG("set power mode failed!\n");
-			return STK8BAXX_ERR_I2C;
-		}
-
-	}
-	return 0;
-}
-
-/*----------------------------------------------------------------------------*/
-
-static int STK8BAXX_SetDelay(struct i2c_client *client, uint32_t sdelay_ns)
-{
-	struct stk8baxx_i2c_data *obj = i2c_get_clientdata(client);
-	unsigned char sr_no;
-	int result;
-
-	uint32_t sdelay_us = sdelay_ns / 1000;
-
-#ifdef STK8BAXX_HOLD_ODR
-	for (sr_no = 0; sr_no < STK8BAXX_SPTIME_NO; sr_no++) {
-		if (sdelay_us >= STK8BAXX_SAMPLE_TIME[sr_no])
-			break;
-	}
-
-	if (sr_no == 0)
-		sdelay_ns = STK8BAXX_SAMPLE_TIME[0] * 1000;
-	else if (sr_no == (STK8BAXX_SPTIME_NO))
-		sdelay_ns = STK8BAXX_SAMPLE_TIME[STK8BAXX_SPTIME_NO - 1] * 1000;
-	sr_no += STK8BAXX_SPTIME_BASE;
-#else
-	sr_no = STK8BAXX_INIT_ODR;
-#endif
-	GSE_LOG("%s:sdelay_ns=%ud, sr_no=%d\n", __func__, sdelay_ns, sr_no);
-	result = STK8BAXX_SetBWSEL(client, sr_no);
-
-	if (result < 0) {
-		GSE_LOG("%s:failed to write reg 0x%x, error=0x%x\n", __func__,
-		       STK8BAXX_BWSEL, result);
-		return result;
-	}
-	obj->gsensor_delay = sdelay_us;
-	return result;
-}
-
-/*----------------------------------------------------------------------------*/
-
-static s64 STK8BAXX_GetDelay(struct stk8baxx_i2c_data *obj)
-{
-	return obj->gsensor_delay;
-}
-
-/*----------------------------------------------------------------------------*/
-static int STK8BAXX_VerifyCali(struct stk8baxx_i2c_data *obj, uint32_t delay_ms)
-{
-	unsigned char axis, state;
-	int acc_ave[3] = { 0, 0, 0 };
-	const unsigned char verify_sample_no = 3;
-	const unsigned char verify_diff = 25;
-	int ret = 0;
-
-	msleep(delay_ms);
-	for (state = 0; state < verify_sample_no; state++) {
-		msleep(delay_ms);
-		STK8BAXX_ReadData(obj->client, obj->data);
-		acc_ave[0] += obj->data[STK8BAXX_AXIS_X];
-		acc_ave[1] += obj->data[STK8BAXX_AXIS_Y];
-		acc_ave[2] += obj->data[STK8BAXX_AXIS_Z];
-#ifdef STK_DEBUG_CALI
-		GSE_LOG("%s: acc=%d,%d,%d\n", __func__, obj->data[STK8BAXX_AXIS_X],
-		       obj->data[STK8BAXX_AXIS_Y], obj->data[STK8BAXX_AXIS_Z]);
-#endif
-	}
-
-	for (axis = 0; axis < 3; axis++)
-		acc_ave[axis] /= verify_sample_no;
-
-	if (obj->cvt.sign[STK8BAXX_AXIS_X] > 0)
-		acc_ave[2] -= STK_LSB_1G;
-	else
-		acc_ave[2] += STK_LSB_1G;
-
-	if (abs(acc_ave[0]) > verify_diff || abs(acc_ave[1]) > verify_diff
-	    || abs(acc_ave[2]) > verify_diff) {
-		GSE_LOG("%s:Check data x:%d, y:%d, z:%d\n", __func__, acc_ave[0],
-		       acc_ave[1], acc_ave[2]);
-		GSE_LOG("%s:Check Fail, Calibration Fail\n", __func__);
-		ret = -STK_K_FAIL_LRG_DIFF;
-	}
-#ifdef STK_DEBUG_CALI
-	else
-		GSE_LOG("%s:Check data pass\n", __func__);
-#endif
-
-	return ret;
-}
-
-
-static int STK8BAXX_SetCaliDo(struct stk8baxx_i2c_data *obj, unsigned int delay_ms)
-{
-	int sample_no, axis;
-	int acc_ave[3] = { 0, 0, 0 };
-	u8 offset[3];
-	u8 offset_in_reg[3];
-	int result;
-
-	msleep(delay_ms * 3);
-	for (sample_no = 0; sample_no < STK_SAMPLE_NO; sample_no++) {
-		msleep(delay_ms);
-		STK8BAXX_ReadData(obj->client, obj->data);
-		acc_ave[0] += obj->data[STK8BAXX_AXIS_X];
-		acc_ave[1] += obj->data[STK8BAXX_AXIS_Y];
-		acc_ave[2] += obj->data[STK8BAXX_AXIS_Z];
-#ifdef STK_DEBUG_CALI
-		GSE_LOG("%s: acc=%d,%d,%d\n", __func__, obj->data[STK8BAXX_AXIS_X],
-		       obj->data[STK8BAXX_AXIS_Y], obj->data[STK8BAXX_AXIS_Z]);
-#endif
-	}
-
-	for (axis = 0; axis < 3; axis++) {
-		if (acc_ave[axis] >= 0)
-			acc_ave[axis] = (acc_ave[axis] + STK_SAMPLE_NO / 2) / STK_SAMPLE_NO;
-		else
-			acc_ave[axis] = (acc_ave[axis] - STK_SAMPLE_NO / 2) / STK_SAMPLE_NO;
-	}
-
-	GSE_LOG("%s: z axis cvt.sign =%d", __func__, obj->cvt.sign[STK8BAXX_AXIS_X]);
-	if (obj->cvt.sign[STK8BAXX_AXIS_X] > 0)
-		acc_ave[2] -= STK_LSB_1G;
-	else
-		acc_ave[2] += STK_LSB_1G;
-
-	STK8BAXX_SetCaliScaleOfst(obj->client, acc_ave);
-
-	for (axis = 0; axis < 3; axis++)
-		offset[axis] = -acc_ave[axis];
-	GSE_LOG("%s: New offset for reg:%d,%d,%d\n", __func__, offset[0], offset[1], offset[2]);
-
-	STK8BAXX_SetOffset(obj->client, offset);
-	result = stk8baxx_hwmsen_read_block(obj->client, STK8BAXX_OFSTFILTX, offset_in_reg, 3);
-	if (result < 0) {
-		GSE_LOG("%s: failed to read offset data, error=%d\n", __func__, result);
-		return result;
-	}
-
-	for (axis = 0; axis < 3; axis++) {
-		if (offset[axis] != offset_in_reg[axis]) {
-			GSE_LOG("%s: set offset to register fail!, offset[%d]=%d,offset_in_reg[%d]=%d\n",
-			       __func__, axis, offset[axis], axis, offset_in_reg[axis]);
-			atomic_set(&obj->cali_status, STK_K_FAIL_WRITE_NOFST);
-			return -STK_K_FAIL_WRITE_NOFST;
-		}
-	}
-
-	result = STK8BAXX_VerifyCali(obj, delay_ms);
-	if (result) {
-		GSE_LOG("%s: calibration check fail, result=0x%x\n", __func__, result);
-		atomic_set(&obj->cali_status, -result);
-		return result;
-	}
-
-	result = stk8baxx_store_in_file(offset, STK_K_SUCCESS_FILE, NULL);
-	if (result < 0) {
-		GSE_LOG("%s:failed to stk8baxx_store_in_file, error=%d\n", __func__,
-		       result);
-		atomic_set(&obj->cali_status, STK_K_FAIL_W_FILE);
-		return result;
-	}
-	atomic_set(&obj->cali_status, STK_K_SUCCESS_FILE);
-#ifdef STK_TUNE
-	obj->stk_tune_offset_record[0] = 0;
-	obj->stk_tune_offset_record[1] = 0;
-	obj->stk_tune_offset_record[2] = 0;
-	obj->stk_tune_done = 1;
-#endif
-	return 0;
-}
-
-static int STK8BAXX_SetCali(struct i2c_client *client)
-{
-	struct stk8baxx_i2c_data *obj = i2c_get_clientdata(client);
-	int result;
-	s64 ord_delay;
-	bool org_sensor_power;
-	uint32_t real_delay_ms;
-
-	GSE_LOG("%s Start!\n", __func__);
-
-	atomic_set(&obj->cali_status, STK_K_RUNNING);
-	org_sensor_power = obj->sensor_power;
-
-	if (!obj->sensor_power) {
-		result = STK8BAXX_SetPowerMode(client, true);
-		if (result < 0) {
-			GSE_LOG("%s:failed to write reg 0x%x, error=0x%x\n", __func__,
-			       STK8BAXX_POWMODE, result);
-			return result;
-		}
-	}
-	ord_delay = STK8BAXX_GetDelay(obj);
-	STK8BAXX_SetDelay(client, 8000000);
-	real_delay_ms = STK8BAXX_GetDelay(obj);
-	real_delay_ms /= USEC_PER_MSEC;
-
-	result = stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_OFSTCOMP1, CAL_OFST_RST);
-	if (result < 0) {
-		GSE_ERR("write offset fail: %d\n", result);
-		goto k_exit;
-	}
-
-	result = STK8BAXX_SetCaliDo(obj, (unsigned int)real_delay_ms);
-	if (result < 0) {
-		GSE_ERR("%s:failed to STK8BAXX_SetCaliDo, error=%d\n", __func__, result);
-		atomic_set(&obj->cali_status, -result);
-		goto k_exit;
-	}
-
-	STK8BAXX_SetDelay(client, ord_delay);
-	if (!org_sensor_power) {
-		result = STK8BAXX_SetPowerMode(client, false);
-		if (result < 0) {
-			GSE_LOG("%s:failed to write reg 0x%x, error=0x%x\n", __func__,
-			       STK8BAXX_POWMODE, result);
-			goto k_exit;
-		}
-	}
-	GSE_LOG("STK8BAXX_SetCali successfully");
-	return 0;
-
-k_exit:
-	STK8BAXX_SetDelay(client, ord_delay);
-	if (!org_sensor_power) {
-		result = STK8BAXX_SetPowerMode(client, false);
-		if (result < 0) {
-			GSE_LOG("%s:failed to write reg 0x%x, error=0x%x\n", __func__,
-			       STK8BAXX_POWMODE, result);
-			return result;
-		}
-	}
-
-	return result;
-}
-
-/*----------------------------------------------------------------------------*/
-static int STK8BAXX_WriteCalibration(struct i2c_client *client, int dat[STK8BAXX_AXES_NUM])
-{
-	struct stk8baxx_i2c_data *obj = i2c_get_clientdata(client);
-	int err;
-	int cali[STK8BAXX_AXES_NUM], raw[STK8BAXX_AXES_NUM];
-	int lsb = stk8baxx_offset_resolution.sensitivity;
-	int divisor;
-
-	GSE_LOG("%s:write cali data dat[0] = %d,dat[1] = %d,dat[2] = %d\n", __func__, dat[0], dat[1],
-	       dat[2]);
-	err = STK8BAXX_ReadCalibrationEx(client, cali, raw);
-	/*offset will be updated in obj->offset */
-	if (err) {
-		GSE_ERR("read offset fail, %d\n", err);
-		return err;
-	}
-
-	GSE_LOG("OLDOFF: (%+3d %+3d %+3d): (%+3d %+3d %+3d) / (%+3d %+3d %+3d)\n",
-		raw[STK8BAXX_AXIS_X], raw[STK8BAXX_AXIS_Y], raw[STK8BAXX_AXIS_Z],
-		obj->offset[STK8BAXX_AXIS_X], obj->offset[STK8BAXX_AXIS_Y],
-		obj->offset[STK8BAXX_AXIS_Z], obj->cali_sw[STK8BAXX_AXIS_X],
-		obj->cali_sw[STK8BAXX_AXIS_Y], obj->cali_sw[STK8BAXX_AXIS_Z]);
-
-	/*calculate the real offset expected by caller */
-	cali[STK8BAXX_AXIS_X] += dat[STK8BAXX_AXIS_X];
-	cali[STK8BAXX_AXIS_Y] += dat[STK8BAXX_AXIS_Y];
-	cali[STK8BAXX_AXIS_Z] += dat[STK8BAXX_AXIS_Z];
-
-	GSE_LOG("UPDATE: (%+3d %+3d %+3d)\n",
-		dat[STK8BAXX_AXIS_X], dat[STK8BAXX_AXIS_Y], dat[STK8BAXX_AXIS_Z]);
-
-
-	if (lsb > obj->reso->sensitivity) {
-		divisor = lsb / obj->reso->sensitivity;
-		obj->offset[STK8BAXX_AXIS_X] =
-		    (s8) (obj->cvt.sign[STK8BAXX_AXIS_X] * (cali[obj->cvt.map[STK8BAXX_AXIS_X]]) *
-			  (divisor));
-		obj->offset[STK8BAXX_AXIS_Y] =
-		    (s8) (obj->cvt.sign[STK8BAXX_AXIS_Y] * (cali[obj->cvt.map[STK8BAXX_AXIS_Y]]) *
-			  (divisor));
-		obj->offset[STK8BAXX_AXIS_Z] =
-		    (s8) (obj->cvt.sign[STK8BAXX_AXIS_Z] * (cali[obj->cvt.map[STK8BAXX_AXIS_Z]]) *
-			  (divisor));
-
-		/*convert software calibration using standard calibration */
-		obj->cali_sw[STK8BAXX_AXIS_X] =
-		    obj->cvt.sign[STK8BAXX_AXIS_X] * (cali[obj->cvt.map[STK8BAXX_AXIS_X]]) %
-		    (divisor);
-		obj->cali_sw[STK8BAXX_AXIS_Y] =
-		    obj->cvt.sign[STK8BAXX_AXIS_Y] * (cali[obj->cvt.map[STK8BAXX_AXIS_Y]]) %
-		    (divisor);
-		obj->cali_sw[STK8BAXX_AXIS_Z] =
-		    obj->cvt.sign[STK8BAXX_AXIS_Z] * (cali[obj->cvt.map[STK8BAXX_AXIS_Z]]) %
-		    (divisor);
-	} else {
-		divisor = obj->reso->sensitivity / lsb;
-
-		obj->offset[STK8BAXX_AXIS_X] =
-		    (s8) (obj->cvt.sign[STK8BAXX_AXIS_X] * (cali[obj->cvt.map[STK8BAXX_AXIS_X]]) /
-			  (divisor));
-		obj->offset[STK8BAXX_AXIS_Y] =
-		    (s8) (obj->cvt.sign[STK8BAXX_AXIS_Y] * (cali[obj->cvt.map[STK8BAXX_AXIS_Y]]) /
-			  (divisor));
-		obj->offset[STK8BAXX_AXIS_Z] =
-		    (s8) (obj->cvt.sign[STK8BAXX_AXIS_Z] * (cali[obj->cvt.map[STK8BAXX_AXIS_Z]]) /
-			  (divisor));
-	}
-
-	GSE_LOG("NEWOFF: (%+3d %+3d %+3d): (%+3d %+3d %+3d) / (%+3d %+3d %+3d)\n",
-		obj->offset[STK8BAXX_AXIS_X] + obj->cali_sw[STK8BAXX_AXIS_X],
-		obj->offset[STK8BAXX_AXIS_Y] + obj->cali_sw[STK8BAXX_AXIS_Y],
-		obj->offset[STK8BAXX_AXIS_Z] + obj->cali_sw[STK8BAXX_AXIS_Z],
-		obj->offset[STK8BAXX_AXIS_X], obj->offset[STK8BAXX_AXIS_Y],
-		obj->offset[STK8BAXX_AXIS_Z], obj->cali_sw[STK8BAXX_AXIS_X],
-		obj->cali_sw[STK8BAXX_AXIS_Y], obj->cali_sw[STK8BAXX_AXIS_Z]);
-
-	usleep_range(1000, 3000);
-	STK8BAXX_SetOffset(client, obj->offset);
-#ifdef STK_TUNE
-	obj->stk_tune_offset_record[0] = obj->offset[0];
-	obj->stk_tune_offset_record[1] = obj->offset[1];
-	obj->stk_tune_offset_record[2] = obj->offset[2];
-	GSE_LOG("%s:write offset[0] = %d, offset[1] = %d, offset[2] = %d\n", __func__,
-	       obj->stk_tune_offset_record[0], obj->stk_tune_offset_record[1],
-	       obj->stk_tune_offset_record[2]);
-#endif
-	usleep_range(11000, 13000);
-	return err;
-}
-
-/*----------------------------------------------------------------------------*/
-static int STK8BAXX_ChkForAddr(struct i2c_client *client, s32 org_address,
-			       unsigned short reset_address)
-{
-	int res;
-	s32 expected_reg0 = 0x86;
-
-	if ((org_address & 0xFE) == 0x18)
-		expected_reg0 = 0x86;
-	else
-		expected_reg0 = 0x87;
-
-	client->addr = reset_address;
-	res = stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_SWRST, STK8BAXX_SWRST_VAL);
-	GSE_LOG("%s:issue sw reset to 0x%x, res=%d\n", __func__, client->addr, res);
-	usleep_range(2000, 3000);
-
-	client->addr = org_address;
-	GSE_LOG("%s Revise I2C Address = 0x%x\n", __func__, org_address);
-	res = stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_POWMODE, STK8BAXX_MD_NORMAL);
-	res = i2c_smbus_read_byte_data(client, 0x0);
-	if (res < 0) {
-		GSE_ERR("%s: read 0x0, res=%d\n", __func__, res);
-		return res;
-	}
-
-	if (res == expected_reg0) {
-		GSE_LOG("%s:passed, expected_reg0=0x%x\n", __func__, expected_reg0);
-		res =
-		    stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_SWRST, STK8BAXX_SWRST_VAL);
-		if (res < 0) {
-			GSE_ERR("%s:failed to issue software reset, error=%d\n", __func__, res);
-			return res;
-		}
-		usleep_range(2000, 3000);
-		return 1;
-	}
-	return 0;
-}
-
-/*----------------------------------------------------------------------------*/
-static int STK8BAXX_SetReset(struct i2c_client *client)
-{
-	int res = 0;
-	unsigned short org_addr = 0;
-
-	GSE_FUN();
-	GSE_LOG("%s, %d\n", __func__, __LINE__);
-
-	org_addr = client->addr;
-	GSE_LOG("%s:org_addr=0x%x\n", __func__, org_addr);
-
-	if ((org_addr & 0xFE) == 0x18) {
-		res = STK8BAXX_ChkForAddr(client, org_addr, 0x18);
-		if (res == 1)
-			return 0;
-		res = STK8BAXX_ChkForAddr(client, org_addr, 0x19);
-		if (res == 1)
-			return 0;
-		res = STK8BAXX_ChkForAddr(client, org_addr, 0x08);
-		if (res == 1)
-			return 0;
-		res = STK8BAXX_ChkForAddr(client, org_addr, 0x28);
-		if (res == 1)
-			return 0;
-	} else if (org_addr == 0x28) {
-		res = STK8BAXX_ChkForAddr(client, org_addr, 0x28);
-		if (res == 1)
-			return 0;
-		res = STK8BAXX_ChkForAddr(client, org_addr, 0x18);
-		if (res == 1)
-			return 0;
-		res = STK8BAXX_ChkForAddr(client, org_addr, 0x08);
-		if (res == 1)
-			return 0;
-	}
-	res = STK8BAXX_ChkForAddr(client, org_addr, 0x0B);
-	return STK8BAXX_SUCCESS;
-}
-
-/*----------------------------------------------------------------------------*/
-static int STK8BAXX_SetWatchDog(struct i2c_client *client, u8 intenable)
-{
-	struct stk8baxx_i2c_data *obj = i2c_get_clientdata(client);
-	int err = 0;
-
-	if (!obj->sensor_power) {
-		err =
-		    stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_POWMODE,
-						       STK8BAXX_MD_NORMAL);
-		if (err < 0) {
-			GSE_LOG("set power mode failed!\n");
-			return STK8BAXX_ERR_I2C;
-		}
-	}
-
-	err = stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_INTFCFG, intenable);
-	if (err < 0)
-		return STK8BAXX_ERR_I2C;
-	if (!obj->sensor_power) {
-		err =
-		    stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_POWMODE,
-						       STK8BAXX_MD_SUSPEND);
-		if (err < 0) {
-			GSE_LOG("set power mode failed!\n");
-			return STK8BAXX_ERR_I2C;
-		}
-
-	}
-
-	return STK8BAXX_SUCCESS;
-}
-
-/*----------------------------------------------------------------------------*/
-static int STK8BAXX_ReadChipInfo(struct i2c_client *client, char *buf, int bufsize)
-{
-	struct stk8baxx_i2c_data *obj = (struct stk8baxx_i2c_data *)i2c_get_clientdata(client);
-
-	if ((NULL == buf) || (bufsize <= 30))
-		return -1;
-
-	if (NULL == client) {
-		*buf = 0;
-		return -2;
-	}
-
-	if (obj->pid == STK8BA50_ID)
-		snprintf(buf, bufsize, "stk8ba50\n");
-	else if (obj->pid == STK8BA50R_ID)
-		snprintf(buf, bufsize, "stk8ba50r\n");
-	else if (obj->pid == STK8BA53_ID)
-		snprintf(buf, bufsize, "stk8ba53\n");
-
-	return 0;
-}
-
-/*----------------------------------------------------------------------------*/
-
-static int STK8BAXX_ReadSensorData(struct i2c_client *client, char *buf, int bufsize)
-{
-	struct stk8baxx_i2c_data *obj = (struct stk8baxx_i2c_data *)i2c_get_clientdata(client);
-	int acc[STK8BAXX_AXES_NUM];
-	int res = 0;
-#ifdef ONTIM_CALI
-	s16 data_cali[3];
-#endif
-
-	if (NULL == buf)
-		return -1;
-	if (NULL == client) {
-		*buf = 0;
-		return -2;
-	}
-#ifdef ONTIM_CALI
-	stk8baxx_load_cali(client);
-	if (((s_nIsCaliLoaded == false) && (stk8baxx_audo_cali_enable == 1))
-	    || (stk8baxx_cali_enable == 1)) {
-		stk8baxx_audo_cali_enable = 2;	/* auto calib running */
-		stk8baxx_cali_enable = 2;
-		s_CaliLoadEnable = false;
-		STK8BAXX_ResetCalibration(client);
-		mdelay(50);
-	}
-#endif
-	res = STK8BAXX_ReadData(client, obj->data);
-	if (res)
-		return -3;
-#ifdef ONTIM_CALI
-	data_cali[STK8BAXX_AXIS_X] = obj->data[STK8BAXX_AXIS_X];
-	data_cali[STK8BAXX_AXIS_Y] = obj->data[STK8BAXX_AXIS_Y];
-	data_cali[STK8BAXX_AXIS_Z] = obj->data[STK8BAXX_AXIS_Z];
-#endif
-
-	obj->data[STK8BAXX_AXIS_X] += obj->cali_sw[STK8BAXX_AXIS_X];
-	obj->data[STK8BAXX_AXIS_Y] += obj->cali_sw[STK8BAXX_AXIS_Y];
-	obj->data[STK8BAXX_AXIS_Z] += obj->cali_sw[STK8BAXX_AXIS_Z];
-	acc[obj->cvt.map[STK8BAXX_AXIS_X]] =
-		    obj->cvt.sign[STK8BAXX_AXIS_X] * obj->data[STK8BAXX_AXIS_X];
-	acc[obj->cvt.map[STK8BAXX_AXIS_Y]] =
-		    obj->cvt.sign[STK8BAXX_AXIS_Y] * obj->data[STK8BAXX_AXIS_Y];
-	acc[obj->cvt.map[STK8BAXX_AXIS_Z]] =
-		    obj->cvt.sign[STK8BAXX_AXIS_Z] * obj->data[STK8BAXX_AXIS_Z];
-	/* Out put the mg */
-	acc[STK8BAXX_AXIS_X] =
-		    acc[STK8BAXX_AXIS_X] * GRAVITY_EARTH_1000 / obj->reso->sensitivity;
-	acc[STK8BAXX_AXIS_Y] =
-		    acc[STK8BAXX_AXIS_Y] * GRAVITY_EARTH_1000 / obj->reso->sensitivity;
-	acc[STK8BAXX_AXIS_Z] =
-		    acc[STK8BAXX_AXIS_Z] * GRAVITY_EARTH_1000 / obj->reso->sensitivity;
-
-	if (atomic_read(&obj->event_since_en) < 1200)
-		atomic_inc(&obj->event_since_en);
-
-	if ((atomic_read(&obj->event_since_en_limit) == (STK_EVENT_SINCE_EN_LIMIT_DEF + 6))
-		    && (acc[STK8BAXX_AXIS_Z] < 0))
-			acc[STK8BAXX_AXIS_Z] *= -1;
-
-	sprintf(buf, "%04x %04x %04x", acc[STK8BAXX_AXIS_X], acc[STK8BAXX_AXIS_Y],
-			acc[STK8BAXX_AXIS_Z]);
-	if (atomic_read(&obj->trace) & ADX_TRC_IOCTL)
-			GSE_LOG("gsensor data: %s!\n", buf);
-#ifdef ONTIM_CALI
-	if (stk8baxx_audo_cali_enable == 2)
-		STK8BAXX_do_audo_cali(acc, data_cali);
-#endif
-	return 0;
-}
-
-/*----------------------------------------------------------------------------*/
-static int STK8BAXX_ReadRawData(struct i2c_client *client, char *buf)
-{
-	struct stk8baxx_i2c_data *obj = (struct stk8baxx_i2c_data *)i2c_get_clientdata(client);
-	int res = 0;
-
-	if (!buf || !client)
-		return -EINVAL;
-	res = STK8BAXX_ReadData(client, obj->data);
-	if (res) {
-		GSE_ERR("I2C error: ret value=%d", res);
-		return -EIO;
-	}
-	sprintf(buf, "%04x %04x %04x", obj->data[STK8BAXX_AXIS_X],
-			obj->data[STK8BAXX_AXIS_Y], obj->data[STK8BAXX_AXIS_Z]);
-
-	GSE_LOG("gsensor data: %s!\n", buf);
-	return 0;
-}
-
-/*----------------------------------------------------------------------------*/
-#ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB
-int STK8BAXX_SCP_SetPowerMode(bool enable, int sensorType)
-{
-	static bool gsensor_scp_en_status;
-	static unsigned int gsensor_scp_en_map;
-	SCP_SENSOR_HUB_DATA req;
-	int len;
-	int err = 0;
-
-	mutex_lock(&gsensor_scp_en_mutex);
-
-	if (sensorType >= 32) {
-		GSE_ERR("Out of index!\n");
-		return -1;
-	}
-
-	if (true == enable)
-		gsensor_scp_en_map |= (1 << sensorType);
-	else
-		gsensor_scp_en_map &= ~(1 << sensorType);
-
-	if (0 == gsensor_scp_en_map)
-		enable = false;
-	else
-		enable = true;
-
-	if (gsensor_scp_en_status != enable) {
-		gsensor_scp_en_status = enable;
-
-		req.activate_req.sensorType = ID_ACCELEROMETER;
-		req.activate_req.action = SENSOR_HUB_ACTIVATE;
-		req.activate_req.enable = enable;
-		len = sizeof(req.activate_req);
-		err = SCP_sensorHub_req_send(&req, &len, 1);
-		if (err)
-			GSE_ERR("SCP_sensorHub_req_send fail!\n");
-	}
-
-	mutex_unlock(&gsensor_scp_en_mutex);
-
-	return err;
-}
-EXPORT_SYMBOL(STK8BAXX_SCP_SetPowerMode);
-#endif				/* #ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB */
-
-/*----------------------------------------------------------------------------*/
-#ifdef STK_PERMISSION_THREAD
-static struct task_struct *STKPermissionThread;
-
-static int stk_permission_thread(void *data)
-{
-	int ret = 0;
-	int retry = 0;
-	mm_segment_t fs = get_fs();
-
-	set_fs(KERNEL_DS);
-	msleep(10000);
-	do {
-		msleep(5000);
-		ret = sys_fchmodat(AT_FDCWD, "/sys/devices/platform/gsensor/driver/cali", 0666);
-		ret = sys_fchmodat(AT_FDCWD, "/sys/devices/platform/gsensor/driver/recv", 0666);
-		ret = sys_fchmodat(AT_FDCWD, "/sys/devices/platform/gsensor/driver/send", 0666);
-		ret = sys_chmod(STK_ACC_CALI_FILE, 0666);
-		ret = sys_fchmodat(AT_FDCWD, STK_ACC_CALI_FILE, 0666);
-		ret = sys_chmod(STK_ACC_CALI_FILE_SDCARD, 0666);
-		ret = sys_fchmodat(AT_FDCWD, STK_ACC_CALI_FILE_SDCARD, 0666);
-		if (retry++ > 10)
-			break;
-	} while (ret == -ENOENT);
-	set_fs(fs);
-	GSE_LOG("%s exit, retry=%d\n", __func__, retry);
-	return 0;
-}
-#endif				/*      #ifdef STK_PERMISSION_THREAD    */
-
-
-static int stk8baxx_write_file(int mode, char write_buf[])
-{
-	struct file *cali_file;
-	char r_buf[STK_ACC_CALI_FILE_SIZE] = { 0 };
-	mm_segment_t fs;
-	ssize_t ret;
-	int8_t i;
-	int err;
-
-	if (mode == 0)
-		cali_file = filp_open(STK_ACC_CALI_FILE, O_CREAT | O_RDWR, 0666);
-	else
-		cali_file = filp_open(STK_ACC_CALI_FILE_SDCARD, O_CREAT | O_RDWR, 0666);
-
-	if (IS_ERR(cali_file)) {
-		err = PTR_ERR(cali_file);
-		GSE_LOG("%s: filp_open error!err=%d\n", __func__, err);
-		return -STK_K_FAIL_OPEN_FILE;
-	}
-	fs = get_fs();
-	set_fs(get_ds());
-
-	ret =
-		    cali_file->f_op->write(cali_file, write_buf, STK_ACC_CALI_FILE_SIZE,
-					   &cali_file->f_pos);
-	if (ret != STK_ACC_CALI_FILE_SIZE) {
-		GSE_LOG("%s: write error!\n", __func__);
-		filp_close(cali_file, NULL);
-		return -STK_K_FAIL_W_FILE;
-	}
-	cali_file->f_pos = 0x00;
-	ret =
-		    cali_file->f_op->read(cali_file, r_buf, STK_ACC_CALI_FILE_SIZE,
-					  &cali_file->f_pos);
-	if (ret < 0) {
-		GSE_LOG("%s: read error!\n", __func__);
-		filp_close(cali_file, NULL);
-		return -STK_K_FAIL_R_BACK;
-
-	}
-	set_fs(fs);
-
-	for (i = 0; i < STK_ACC_CALI_FILE_SIZE; i++) {
-		if (r_buf[i] != write_buf[i]) {
-			GSE_LOG("%s: read back error, r_buf[%x](0x%x) != write_buf[%x](0x%x)\n",
-				       __func__, i, r_buf[i], i, write_buf[i]);
-				filp_close(cali_file, NULL);
-			return -STK_K_FAIL_R_BACK_COMP;
-		}
-	}
-	filp_close(cali_file, NULL);
-
-#ifdef STK_PERMISSION_THREAD
-	fs = get_fs();
-	set_fs(KERNEL_DS);
-	if (mode == 0) {
-		ret = sys_chmod(STK_ACC_CALI_FILE, 0666);
-		ret = sys_fchmodat(AT_FDCWD, STK_ACC_CALI_FILE, 0666);
-	} else {
-		ret = sys_chmod(STK_ACC_CALI_FILE_SDCARD, 0666);
-		ret = sys_fchmodat(AT_FDCWD, STK_ACC_CALI_FILE_SDCARD, 0666);
-	}
-	set_fs(fs);
-#endif
-	return 0;
-}
-
-static int stk8baxx_store_in_file(u8 offset[], u8 status, u32 variance[])
-{
-	char w_buf[STK_ACC_CALI_FILE_SIZE] = { 0 };
-	int err;
-
-	w_buf[0] = STK_ACC_CALI_VER0;
-	w_buf[1] = STK_ACC_CALI_VER1;
-	w_buf[3] = offset[0];
-	w_buf[5] = offset[1];
-	w_buf[7] = offset[2];
-	w_buf[8] = status;
-
-	if (variance == NULL) {
-		w_buf[9] = 0;
-		w_buf[10] = 0;
-		w_buf[11] = 0;
-		w_buf[12] = 0;
-		w_buf[13] = 0;
-		w_buf[14] = 0;
-		w_buf[15] = 0;
-		w_buf[16] = 0;
-		w_buf[17] = 0;
-	} else {
-		w_buf[9] = ((variance[0] >> 24) & 0xFF);
-		w_buf[10] = ((variance[0] >> 16) & 0xFF);
-		w_buf[11] = ((variance[0] >> 8) & 0xFF);
-		w_buf[12] = (variance[0] & 0xFF);
-		w_buf[13] = ((variance[1] >> 24) & 0xFF);
-		w_buf[14] = ((variance[1] >> 16) & 0xFF);
-		w_buf[15] = ((variance[1] >> 8) & 0xFF);
-		w_buf[16] = (variance[1] & 0xFF);
-		w_buf[17] = ((variance[2] >> 24) & 0xFF);
-		w_buf[18] = ((variance[2] >> 16) & 0xFF);
-		w_buf[19] = ((variance[2] >> 8) & 0xFF);
-		w_buf[20] = (variance[2] & 0xFF);
-	}
-	w_buf[STK_ACC_CALI_FILE_SIZE - 2] = '\0';
-	w_buf[STK_ACC_CALI_FILE_SIZE - 1] = STK_ACC_CALI_END;
-	GSE_LOG("%s: xyz: %d======%d============%d\n", __func__, offset[0], offset[1], offset[2]);
-
-	stk8baxx_write_file(1, w_buf);
-	err = stk8baxx_write_file(0, w_buf);
-	if (err == 0)
-		GSE_LOG("%s successfully\n", __func__);
-	return 0;
-}
-
-/*----------------------------------------------------------------------------*/
-static int stk8baxx_init_client(struct i2c_client *client, int reset_cali)
-{
-	struct stk8baxx_i2c_data *obj = i2c_get_clientdata(client);
-	int res = 0;
-	bool org_sensor_power;
-#ifdef STK_TUNE
-	int aa;
-#endif
-
-#ifdef CONFIG_SENSORS_STK8BA53
-	GSE_LOG("%s: Initialize stk8ba53\n", __func__);
-#else
-	GSE_LOG("%s: Initialize stk8ba50/stk8ba50-r\n", __func__);
-#endif
-
-	obj->sensor_power = false;
-	org_sensor_power = obj->sensor_power;
-
-	res = STK8BAXX_SetReset(client);
-	if (res != STK8BAXX_SUCCESS) {
-		GSE_LOG("stk8baxx set reset error\n");
-		return res;
-	}
-
-	res = STK8BAXX_SetPowerMode(client, true);
-	if (res != STK8BAXX_SUCCESS) {
-		GSE_LOG("stk8baxx set power mode error\n");
-		return res;
-	}
-
-	res = i2c_smbus_read_byte_data(client, STK8BAXX_LGDLY);
-	if (res < 0) {
-		GSE_ERR("i2c transfer failed, err=%d\n", res);
-		return res;
-	}
-	if (res == STK8BA50_ID) {
-		GSE_LOG("%s: chip is stk8ba50\n", __func__);
-		obj->pid = STK8BA50_ID;
-	} else {
-		res = i2c_smbus_read_byte_data(client, 0x0);
-		if (res < 0) {
-			GSE_ERR("failed to read acc data, error=%d\n", res);
-			return res;
-		}
-		GSE_LOG("%s: 0x0=0x%x\n", __func__, res);
-		if (res == STK8BA50R_ID) {
-			GSE_LOG("%s: chip is stk8ba50-R\n", __func__);
-			obj->pid = STK8BA50R_ID;
-		} else {
-			GSE_LOG("%s: chip is stk8ba53\n", __func__);
-			obj->pid = STK8BA53_ID;
-		}
-	}
-
-#ifdef CUSTOM_KERNEL_SENSORHUB
-	res = gsensor_setup_irq();
-	if (res != STK8BAXX_SUCCESS)
-		return res;
-/* map new data int to int1 */
-	res = stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_INTMAP2, 0x01);
-	if (res < 0) {
-		GSE_LOG("%s:failed to write reg 0x%x, error=0x%x\n", __func__,
-		       STK8BAXX_INTMAP2, res);
-		return res;
-	}
-	/*      enable new data int */
-	res = stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_INTEN2, 0x10);
-	if (res < 0) {
-		GSE_LOG("%s:failed to write reg 0x%x, error=0x%x\n", __func__,
-		       STK8BAXX_INTEN2, res);
-		return res;
-	}
-	/*      non-latch int   */
-	res = stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_INTCFG2, 0x00);
-	if (res < 0) {
-		GSE_LOG("%s:failed to write reg 0x%x, error=0x%x\n", __func__,
-		       STK8BAXX_INTCFG2, res);
-		return res;
-	}
-	/*      filtered data source for new data int   */
-	res = stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_DATASRC, 0x00);
-	if (res < 0) {
-		GSE_LOG("%s:failed to write reg 0x%x, error=0x%x\n", __func__,
-		       STK8BAXX_DATASRC, res);
-		return res;
-	}
-	/*      int1, push-pull, active high    */
-	res = stk8baxx_i2c_smbus_write_byte_data(client, STK8BAXX_INTCFG1, 0x01);
-	if (res < 0) {
-		GSE_LOG("%s:failed to write reg 0x%x, error=0x%x\n", __func__,
-		       STK8BAXX_INTCFG1, res);
-		return res;
-	}
-#endif				/* #ifdef CUSTOM_KERNEL_SENSORHUB */
-
-	/*      According to STK_DEF_DYNAMIC_RANGE */
-	res = STK8BAXX_SetDataResolution(client, STK_DEF_DYNAMIC_RANGE);
-	if (res != STK8BAXX_SUCCESS) {
-		GSE_LOG("stk8baxx set data reslution error\n");
-		return res;
-	}
-	gsensor_gain.x = gsensor_gain.y = gsensor_gain.z = obj->reso->sensitivity;
-
-	/*      ODR = 37 Hz     */
-	res = STK8BAXX_SetBWSEL(client, STK8BAXX_INIT_ODR);
-	if (res != STK8BAXX_SUCCESS) {
-		GSE_LOG("stk8baxx set data format error\n");
-		return res;
-	}
-
-	/*      i2c watchdog enable, 1 ms timer perios  */
-	res = STK8BAXX_SetWatchDog(client, 0x04);
-	if (res < 0) {
-		GSE_LOG("%s:failed to write reg 0x%x, error=0x%x\n", __func__,
-			STK8BAXX_INTFCFG, res);
-		return res;
-	}
-
-	if (0 != reset_cali) {
-		/*reset calibration only in power on */
-		GSE_LOG("stk8baxx  set cali\n");
-		res = STK8BAXX_ResetCalibration(client);
-		if (res != STK8BAXX_SUCCESS) {
-			GSE_LOG("stk8baxx set cali error\n");
-			return res;
-		}
-	}
-	res = STK8BAXX_SetPowerMode(client, org_sensor_power);
-	if (res != STK8BAXX_SUCCESS) {
-		GSE_LOG("stk8baxx set power mode error\n");
-		return res;
-	}
-#ifdef STK_TUNE
-	for (aa = 0; aa < 3; aa++) {
-		obj->stk_tune_offset[aa] = 0;
-		obj->stk_tune_offset_record[aa] = 0;
-		obj->stk_tune_sum[aa] = 0;
-		obj->stk_tune_max[aa] = 0;
-		obj->stk_tune_min[aa] = 0;
-		obj->stk_tune_square_sum[aa] = 0LL;
-	}
-	obj->stk_tune_done = 0;
-	obj->stk_tune_index = 0;
-	obj->first_enable = true;
-#endif
-
-#ifdef CONFIG_STK8BAXX_LOWPASS
-	memset(&obj->fir, 0x00, sizeof(obj->fir));
-#endif
-	obj->gsensor_delay = 32000;
-	atomic_set(&obj->event_since_en_limit, STK_EVENT_SINCE_EN_LIMIT_DEF);
-#ifdef _STK_SUPPORT_LRF_
-	memset(&s_taLRF_CB, 0, sizeof(s_taLRF_CB));
-#endif
-	GSE_LOG("stk8baxx Init OK\n");
-	return res;
-}
-
-/*----------------------------------------------------------------------------*/
-static ssize_t show_chipinfo_value(struct device_driver *ddri, char *buf)
-{
-	struct i2c_client *client = stk8baxx_i2c_client;
-	char strbuf[STK8BAXX_BUFSIZE];
-
-	if (NULL == client) {
-		GSE_ERR("i2c client is null!!\n");
-		return 0;
-	}
-
-	STK8BAXX_ReadChipInfo(client, strbuf, STK8BAXX_BUFSIZE);
-	return snprintf(buf, PAGE_SIZE, "%s\n", strbuf);
-}
-
-
-/*----------------------------------------------------------------------------*/
-static ssize_t show_sensordata_value(struct device_driver *ddri, char *buf)
-{
-	struct i2c_client *client = stk8baxx_i2c_client;
-	char strbuf[STK8BAXX_BUFSIZE];
-
-	if (NULL == client) {
-		GSE_ERR("i2c client is null!!\n");
-		return 0;
-	}
-	STK8BAXX_ReadSensorData(client, strbuf, STK8BAXX_BUFSIZE);
-	return snprintf(buf, PAGE_SIZE, "%s\n", strbuf);
-}
-
-
-/*----------------------------------------------------------------------------*/
-static ssize_t show_cali_value(struct device_driver *ddri, char *buf)
-{
-	int err, len = 0, mul;
-	int tmp[STK8BAXX_AXES_NUM];
-	struct i2c_client *client = stk8baxx_i2c_client;
-	struct stk8baxx_i2c_data *obj;
-	s8 all_offset[STK8BAXX_AXES_NUM];
-
-	obj = i2c_get_clientdata(client);
-	if (NULL == client) {
-		GSE_ERR("i2c client is null!!\n");
-		return 0;
-	}
-	GSE_LOG("en = %d, en_limit = %d , power = %d\n", atomic_read(&obj->event_since_en),
-		atomic_read(&obj->event_since_en_limit), obj->sensor_power);
-	err = STK8BAXX_ReadOffset(client, obj->offset);
-	if (err)
-		return -EINVAL;
-	err = STK8BAXX_ReadCalibration(client, tmp);
-	if (err)
-		return -EINVAL;
-	if (stk8baxx_offset_resolution.sensitivity < obj->reso->sensitivity) {
-		mul = obj->reso->sensitivity / stk8baxx_offset_resolution.sensitivity;
-		all_offset[STK8BAXX_AXIS_X] =
-			    obj->offset[STK8BAXX_AXIS_X] * mul + obj->cali_sw[STK8BAXX_AXIS_X];
-		all_offset[STK8BAXX_AXIS_Y] =
-			    obj->offset[STK8BAXX_AXIS_Y] * mul + obj->cali_sw[STK8BAXX_AXIS_Y];
-		all_offset[STK8BAXX_AXIS_Z] =
-			    obj->offset[STK8BAXX_AXIS_Z] * mul + obj->cali_sw[STK8BAXX_AXIS_Z];
-		} else {
-			mul = stk8baxx_offset_resolution.sensitivity / obj->reso->sensitivity;
-			all_offset[STK8BAXX_AXIS_X] =
-			    obj->offset[STK8BAXX_AXIS_X] / mul + obj->cali_sw[STK8BAXX_AXIS_X];
-			all_offset[STK8BAXX_AXIS_Y] =
-			    obj->offset[STK8BAXX_AXIS_Y] / mul + obj->cali_sw[STK8BAXX_AXIS_Y];
-			all_offset[STK8BAXX_AXIS_Z] =
-			    obj->offset[STK8BAXX_AXIS_Z] / mul + obj->cali_sw[STK8BAXX_AXIS_Z];
-			mul = -1;
-		}
-
-		len +=
-		    snprintf(buf + len, PAGE_SIZE - len,
-			     "%x\n[HW ][%d] (%+3d, %+3d, %+3d) : (0x%02X, 0x%02X, 0x%02X)\n",
-			     atomic_read(&obj->cali_status), mul, obj->offset[STK8BAXX_AXIS_X],
-			     obj->offset[STK8BAXX_AXIS_Y], obj->offset[STK8BAXX_AXIS_Z],
-			     obj->offset[STK8BAXX_AXIS_X], obj->offset[STK8BAXX_AXIS_Y],
-			     obj->offset[STK8BAXX_AXIS_Z]);
-		len +=
-		    snprintf(buf + len, PAGE_SIZE - len, "[SW ][%d] (%+3d, %+3d, %+3d)\n", 1,
-			     obj->cali_sw[STK8BAXX_AXIS_X], obj->cali_sw[STK8BAXX_AXIS_Y],
-			     obj->cali_sw[STK8BAXX_AXIS_Z]);
-
-		len +=
-		    snprintf(buf + len, PAGE_SIZE - len,
-			     "[ALL]    (%+3d, %+3d, %+3d) : (%+3d, %+3d, %+3d)\n",
-			     all_offset[STK8BAXX_AXIS_X], all_offset[STK8BAXX_AXIS_Y],
-			     all_offset[STK8BAXX_AXIS_Z], tmp[STK8BAXX_AXIS_X],
-			     tmp[STK8BAXX_AXIS_Y], tmp[STK8BAXX_AXIS_Z]);
-
-		return len;
-}
-
-/*----------------------------------------------------------------------------*/
-static ssize_t store_cali_value(struct device_driver *ddri, const char *buf, size_t count)
-{
-	struct i2c_client *client = stk8baxx_i2c_client;
-	int err, x, y, z, sstate;
-	int dat[STK8BAXX_AXES_NUM];
-
-	if (!strncmp(buf, "rst", 3)) {
-		err = STK8BAXX_ResetCalibration(client);
-		if (err)
-			GSE_ERR("reset offset err = %d\n", err);
-	} else if (3 == sscanf(buf, "0x%02X 0x%02X 0x%02X", &x, &y, &z)) {
-		dat[STK8BAXX_AXIS_X] = x;
-		dat[STK8BAXX_AXIS_Y] = y;
-		dat[STK8BAXX_AXIS_Z] = z;
-		err = STK8BAXX_WriteCalibration(client, dat);
-		if (err)
-			GSE_ERR("write calibration err = %d\n", err);
-	} else if (1 == kstrtoint(buf, 10, &sstate)) {
-		GSE_LOG("%s: sstate = %d\n", __func__, sstate);
-		if (sstate == 1) {
-			err = STK8BAXX_SetCali(client);
-			if (err)
-				GSE_ERR("calibration err = %d\n", err);
-		}
-	} else
-		GSE_ERR("invalid format\n");
-	return count;
-}
-
-/*----------------------------------------------------------------------------*/
-static ssize_t show_firlen_value(struct device_driver *ddri, char *buf)
-{
-#ifdef CONFIG_STK8BAXX_LOWPASS
-	struct i2c_client *client = stk8baxx_i2c_client;
-	struct stk8baxx_i2c_data *obj = i2c_get_clientdata(client);
-
-	if (atomic_read(&obj->firlen)) {
-		int idx, len = atomic_read(&obj->firlen);
-
-		GSE_LOG("len = %2d, idx = %2d\n", obj->fir.num, obj->fir.idx);
-
-		for (idx = 0; idx < len; idx++) {
-			GSE_LOG("[%5d %5d %5d]\n", obj->fir.raw[idx][STK8BAXX_AXIS_X],
-				obj->fir.raw[idx][STK8BAXX_AXIS_Y],
-				obj->fir.raw[idx][STK8BAXX_AXIS_Z]);
-		}
-
-		GSE_LOG("sum = [%5d %5d %5d]\n", obj->fir.sum[STK8BAXX_AXIS_X],
-			obj->fir.sum[STK8BAXX_AXIS_Y], obj->fir.sum[STK8BAXX_AXIS_Z]);
-		GSE_LOG("avg = [%5d %5d %5d]\n", obj->fir.sum[STK8BAXX_AXIS_X] / len,
-			obj->fir.sum[STK8BAXX_AXIS_Y] / len, obj->fir.sum[STK8BAXX_AXIS_Z] / len);
-	}
-	return snprintf(buf, PAGE_SIZE, "firlen = %d, en=%d, filter=%d\n",
-			atomic_read(&obj->firlen), atomic_read(&obj->fir_en),
-			atomic_read(&obj->filter));
-#else
-	return snprintf(buf, PAGE_SIZE, "not support\n");
-#endif
-}
-
-/*----------------------------------------------------------------------------*/
-static ssize_t store_firlen_value(struct device_driver *ddri, const char *buf, size_t count)
-{
-#ifdef CONFIG_STK8BAXX_LOWPASS
-	struct i2c_client *client = stk8baxx_i2c_client;
-	struct stk8baxx_i2c_data *obj = i2c_get_clientdata(client);
-	int firlen;
-
-	if (kstrtoint(buf, 10, &firlen)) {
-		GSE_ERR("invallid format\n");
-	} else if (firlen > C_MAX_FIR_LENGTH) {
-		GSE_ERR("exceeds maximum filter length\n");
-	} else {
-		atomic_set(&obj->firlen, firlen);
-		if (0 == firlen) {
-			atomic_set(&obj->fir_en, 0);
-		} else {
-			memset(&obj->fir, 0x00, sizeof(obj->fir));
-			atomic_set(&obj->fir_en, 1);
-		}
-	}
-#endif
-	return count;
-}
-
-/*----------------------------------------------------------------------------*/
-static ssize_t show_trace_value(struct device_driver *ddri, char *buf)
-{
-	ssize_t res;
-	struct stk8baxx_i2c_data *obj = obj_i2c_data;
-
-	if (obj == NULL) {
-		GSE_ERR("i2c_data obj is null!!\n");
-		return 0;
-	}
-
-	res = snprintf(buf, PAGE_SIZE, "0x%04X\n", atomic_read(&obj->trace));
-	return res;
-}
-
-/*----------------------------------------------------------------------------*/
-static ssize_t store_trace_value(struct device_driver *ddri, const char *buf, size_t count)
-{
-	struct stk8baxx_i2c_data *obj = obj_i2c_data;
-	int trace;
-
-	if (obj == NULL) {
-		GSE_ERR("i2c_data obj is null!!\n");
-		return 0;
-	}
-
-	if (1 == sscanf(buf, "0x%x", &trace))
-		atomic_set(&obj->trace, trace);
-	else
-		GSE_ERR("invalid content: '%s', length = %d\n", buf, (int)count);
-
-	return count;
-}
-
-/*----------------------------------------------------------------------------*/
-static ssize_t show_status_value(struct device_driver *ddri, char *buf)
-{
-	ssize_t len = 0;
-	struct stk8baxx_i2c_data *obj = obj_i2c_data;
-
-	if (obj == NULL) {
-		GSE_ERR("i2c_data obj is null!!\n");
-		return 0;
-	}
-
-	len += snprintf(buf + len, PAGE_SIZE - len, "CUST: %d %d (%d %d)\n",
-			obj->hw.i2c_num, obj->hw.direction, obj->hw.power_id, obj->hw.power_vol);
-	return len;
-}
-
-/*----------------------------------------------------------------------------*/
-static ssize_t show_power_status_value(struct device_driver *ddri, char *buf)
-{
-	if (sensor_power)
-		GSE_LOG("G sensor is in work mode, sensor_power = %d\n", sensor_power);
-	else
-		GSE_LOG("G sensor is in standby mode, sensor_power = %d\n", sensor_power);
-
-	return 0;
-}
-
-static char selftestRes[10] = { 0 };
-
-/*****************************************
- *** show_selftest_value
- *****************************************/
-static ssize_t show_selftest_value(struct device_driver *ddri, char *buf)
-{
-	struct stk8baxx_i2c_data *obj = obj_i2c_data;
-
-	if (obj == NULL) {
-		GSE_ERR("i2c_data obj is null!!\n");
-		return 0;
-	}
-
-	return snprintf(buf, 8, "%s\n", selftestRes);
-}
-
-/*****************************************
- *** stk8baxx_JudgeTestResult
- *****************************************/
-static int stk8baxx_JudgeTestResult(struct stk8baxx_i2c_data *obj)
-{
-	int res = 0;
-	int self_result = 0;
-	s16 acc[STK8BAXX_AXES_NUM] = { 0 };
-
-	res = STK8BAXX_ReadData(obj->client, acc);
-	if (res) {
-		GSE_ERR("I2C error: ret value=%d", res);
-		return -EIO;
-	}
-	acc[STK8BAXX_AXIS_X] = acc[STK8BAXX_AXIS_X] * 1000 / gsensor_gain.x;
-	acc[STK8BAXX_AXIS_Y] = acc[STK8BAXX_AXIS_Y] * 1000 / gsensor_gain.y;
-	acc[STK8BAXX_AXIS_Z] = acc[STK8BAXX_AXIS_Z] * 1000 / gsensor_gain.z;
-
-	self_result = ((acc[STK8BAXX_AXIS_X] * acc[STK8BAXX_AXIS_X])
-			       + (acc[STK8BAXX_AXIS_Y] * acc[STK8BAXX_AXIS_Y])
-			       + (acc[STK8BAXX_AXIS_Z] * acc[STK8BAXX_AXIS_Z]));
-	/* between 0.7g and 1.5g */
-	if ((self_result > 475923) && (self_result < 2185360)) {
-		GSE_ERR("stk8baxx_JudgeTestResult successful\n");
-		return 0;
-	}
-	GSE_ERR("stk8baxx_JudgeTestResult failt\n");
-	return -EINVAL;
-}
-
-/*****************************************
- *** store_selftest_value
- *****************************************/
-static ssize_t store_selftest_value(struct device_driver *ddri, const char *buf, size_t count)
-{				/*write anything to this register will trigger the process */
-	struct stk8baxx_i2c_data *obj = obj_i2c_data;
-	int num = 0;
-	int ret = 0;
-
-	if (obj == NULL) {
-		GSE_ERR("i2c_data obj is null!!\n");
-		return 0;
-	}
-
-	ret = kstrtoint(buf, 10, &num);
-	if (ret != 0) {
-		GSE_ERR("parse number fail\n");
-		return count;
-	} else if (0 == num) {
-		GSE_ERR("invalid data count\n");
-		return count;
-	}
-
-	GSE_LOG("NORMAL:\n");
-	mutex_lock(&gsensor_mutex);
-	STK8BAXX_SetPowerMode(obj->client, true);
-	mutex_unlock(&gsensor_mutex);
-	GSE_LOG("SELFTEST:\n");
-
-	if (!stk8baxx_JudgeTestResult(obj)) {
-		GSE_LOG("SELFTEST : PASS\n");
-		strcpy(selftestRes, "y");
-	} else {
-		GSE_LOG("SELFTEST : FAIL\n");
-		strcpy(selftestRes, "n");
-	}
-
-	return count;
-}
-
-/*----------------------------------------------------------------------------*/
-static DRIVER_ATTR(chipinfo, S_IWUSR | S_IRUGO, show_chipinfo_value, NULL);
-static DRIVER_ATTR(sensordata, S_IWUSR | S_IRUGO, show_sensordata_value, NULL);
-static DRIVER_ATTR(cali, S_IWUSR | S_IRUGO, show_cali_value, store_cali_value);
-static DRIVER_ATTR(firlen, S_IWUSR | S_IRUGO, show_firlen_value, store_firlen_value);
-static DRIVER_ATTR(trace, S_IWUSR | S_IRUGO, show_trace_value, store_trace_value);
-static DRIVER_ATTR(status, S_IRUGO, show_status_value, NULL);
-static DRIVER_ATTR(powerstatus, S_IRUGO, show_power_status_value, NULL);
-static DRIVER_ATTR(selftest, S_IWUSR | S_IRUGO, show_selftest_value, store_selftest_value);
-
-/*----------------------------------------------------------------------------*/
-static struct driver_attribute *stk8baxx_attr_list[] = {
-	&driver_attr_chipinfo,	/*chip information */
-	&driver_attr_sensordata,	/*dump sensor data */
-	&driver_attr_cali,	/*show calibration data */
-	&driver_attr_firlen,	/*filter length: 0: disable, others: enable */
-	&driver_attr_trace,	/*trace log */
-	&driver_attr_status,
-	&driver_attr_powerstatus,
-	&driver_attr_selftest,
-};
-
-/*----------------------------------------------------------------------------*/
-static int stk8baxx_create_attr(struct device_driver *driver)
-{
-	int idx, err = 0;
-	int num = (int)(sizeof(stk8baxx_attr_list) / sizeof(stk8baxx_attr_list[0]));
-
-	if (driver == NULL)
-		return -EINVAL;
-
-	for (idx = 0; idx < num; idx++) {
-		err = driver_create_file(driver, stk8baxx_attr_list[idx]);
-		if (err) {
-			GSE_ERR("driver_create_file (%s) = %d\n",
-				stk8baxx_attr_list[idx]->attr.name, err);
-			break;
-		}
-	}
-	return err;
-}
-
-/*----------------------------------------------------------------------------*/
-static int stk8baxx_delete_attr(struct device_driver *driver)
-{
-	int idx, err = 0;
-	int num = (int)(sizeof(stk8baxx_attr_list) / sizeof(stk8baxx_attr_list[0]));
-
-	if (driver == NULL)
-		return -EINVAL;
-
-	for (idx = 0; idx < num; idx++)
-		driver_remove_file(driver, stk8baxx_attr_list[idx]);
-
-	return err;
-}
-
-/*----------------------------------------------------------------------------*/
-#ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB
-static void gsensor_irq_work(struct work_struct *work)
-{
-	struct stk8baxx_i2c_data *obj = obj_i2c_data;
-	struct scp_acc_hw scp_hw;
-	union STK8BAXX_CUST_DATA *p_cust_data;
-	SCP_SENSOR_HUB_DATA data;
-	int max_cust_data_size_per_packet;
-	int i;
-	uint sizeOfCustData;
-	uint len;
-	char *p = (char *)&scp_hw;
-
-	GSE_FUN();
-
-	scp_hw.i2c_num = obj->hw.i2c_num;
-	scp_hw.direction = obj->hw.direction;
-	scp_hw.power_id = obj->hw.power_id;
-	scp_hw.power_vol = obj->hw.power_vol;
-	scp_hw.firlen = obj->hw.firlen;
-	memcpy(scp_hw.i2c_addr, obj->hw.i2c_addr, sizeof(obj->hw.i2c_addr));
-	scp_hw.power_vio_id = obj->hw.power_vio_id;
-	scp_hw.power_vio_vol = obj->hw.power_vio_vol;
-	scp_hw.is_batch_supported = obj->hw.is_batch_supported;
-
-	p_cust_data = (union STK8BAXX_CUST_DATA *)data.set_cust_req.custData;
-	sizeOfCustData = sizeof(scp_hw);
-	max_cust_data_size_per_packet =
-	    sizeof(data.set_cust_req.custData) - offsetof(STK8BAXX_SET_CUST, data);
-
-	for (i = 0; sizeOfCustData > 0; i++) {
-		data.set_cust_req.sensorType = ID_ACCELEROMETER;
-		data.set_cust_req.action = SENSOR_HUB_SET_CUST;
-		p_cust_data->setCust.action = STK8BAXX_CUST_ACTION_SET_CUST;
-		p_cust_data->setCust.part = i;
-		if (sizeOfCustData > max_cust_data_size_per_packet)
-			len = max_cust_data_size_per_packet;
-		else
-			len = sizeOfCustData;
-
-		memcpy(p_cust_data->setCust.data, p, len);
-		sizeOfCustData -= len;
-		p += len;
-
-		len +=
-		    offsetof(SCP_SENSOR_HUB_SET_CUST_REQ, custData) + offsetof(STK8BAXX_SET_CUST,
-									       data);
-		SCP_sensorHub_req_send(&data, &len, 1);
-	}
-
-	p_cust_data = (union STK8BAXX_CUST_DATA *)&data.set_cust_req.custData;
-
-	data.set_cust_req.sensorType = ID_ACCELEROMETER;
-	data.set_cust_req.action = SENSOR_HUB_SET_CUST;
-	p_cust_data->resetCali.action = STK8BAXX_CUST_ACTION_RESET_CALI;
-	len = offsetof(SCP_SENSOR_HUB_SET_CUST_REQ, custData) + sizeof(p_cust_data->resetCali);
-	SCP_sensorHub_req_send(&data, &len, 1);
-
-	obj->SCP_init_done = 1;
-}
-
-/*----------------------------------------------------------------------------*/
-static int gsensor_irq_handler(void *data, uint len)
-{
-	struct stk8baxx_i2c_data *obj = obj_i2c_data;
-	SCP_SENSOR_HUB_DATA_P rsp = (SCP_SENSOR_HUB_DATA_P) data;
-
-	GSE_FUN();
-	GSE_LOG("len = %d, type = %d, action = %d, errCode = %d\n", len, rsp->rsp.sensorType,
-		rsp->rsp.action, rsp->rsp.errCode);
-
-	if (!obj)
-		return -1;
-
-	switch (rsp->rsp.action) {
-	case SENSOR_HUB_NOTIFY:
-		switch (rsp->notify_rsp.event) {
-		case SCP_INIT_DONE:
-			schedule_work(&obj->irq_work);
-			/* schedule_delayed_work(&obj->irq_work, HZ); */
-			break;
-		default:
-			GSE_ERR("Error sensor hub notify");
-			break;
-		}
-		break;
-	default:
-		GSE_ERR("Error sensor hub action");
-		break;
-	}
-
-	return 0;
-}
-
-static int gsensor_setup_irq(void)
-{
-	int err = 0;
-#ifdef GSENSOR_UT
-	GSE_FUN();
-#endif
-	err = SCP_sensorHub_rsp_registration(ID_ACCELEROMETER, gsensor_irq_handler);
-	return err;
-}
-#endif				/* #ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB */
-
-/******************************************************************************
- * Function Configuration
-******************************************************************************/
-static int stk8baxx_open(struct inode *inode, struct file *file)
-{
-	file->private_data = stk8baxx_i2c_client;
-
-	if (file->private_data == NULL) {
-		GSE_ERR("null pointer!!\n");
-		return -EINVAL;
-	}
-	return nonseekable_open(inode, file);
-}
-
-/*----------------------------------------------------------------------------*/
-static int stk8baxx_release(struct inode *inode, struct file *file)
-{
-	file->private_data = NULL;
-	return 0;
-}
-
-/*----------------------------------------------------------------------------*/
-/* static int stk8baxx_ioctl(struct inode *inode, struct file *file, unsigned int cmd, */
-/* unsigned long arg) */
-static long stk8baxx_unlocked_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
-{
-	struct i2c_client *client = (struct i2c_client *)file->private_data;
-	struct stk8baxx_i2c_data *obj = (struct stk8baxx_i2c_data *)i2c_get_clientdata(client);
-	char strbuf[STK8BAXX_BUFSIZE];
-	void __user *data;
-	struct SENSOR_DATA sensor_data;
-	long err = 0;
-	int cali[3];
-
-	/* GSE_FUN(f); */
-	if (_IOC_DIR(cmd) & _IOC_READ)
-		err = !access_ok(VERIFY_WRITE, (void __user *)arg, _IOC_SIZE(cmd));
-	else if (_IOC_DIR(cmd) & _IOC_WRITE)
-		err = !access_ok(VERIFY_READ, (void __user *)arg, _IOC_SIZE(cmd));
-
-	if (err) {
-		GSE_ERR("access error: %08X, (%2d, %2d)\n", cmd, _IOC_DIR(cmd), _IOC_SIZE(cmd));
+		STK_ACC_ERR("send command error!!\n");
+		mutex_unlock(&STK8BA5X_i2c_mutex);
 		return -EFAULT;
 	}
+	err = 0;
 
-	switch (cmd) {
-	case GSENSOR_IOCTL_INIT:
-		stk8baxx_init_client(client, 0);
-		break;
-
-	case GSENSOR_IOCTL_READ_CHIPINFO:
-		data = (void __user *)arg;
-		if (data == NULL) {
-			err = -EINVAL;
-			break;
-		}
-
-		STK8BAXX_ReadChipInfo(client, strbuf, STK8BAXX_BUFSIZE);
-		if (copy_to_user(data, strbuf, strlen(strbuf) + 1)) {
-			err = -EFAULT;
-			break;
-		}
-		break;
-
-	case GSENSOR_IOCTL_READ_SENSORDATA:
-		data = (void __user *)arg;
-		if (data == NULL) {
-			err = -EINVAL;
-			break;
-		}
-
-		STK8BAXX_ReadSensorData(client, strbuf, STK8BAXX_BUFSIZE);
-		if (copy_to_user(data, strbuf, strlen(strbuf) + 1)) {
-			err = -EFAULT;
-			break;
-		}
-		break;
-
-	case GSENSOR_IOCTL_READ_GAIN:
-		data = (void __user *)arg;
-		if (data == NULL) {
-			err = -EINVAL;
-			break;
-		}
-
-		if (copy_to_user(data, &gsensor_gain, sizeof(struct GSENSOR_VECTOR3D))) {
-			err = -EFAULT;
-			break;
-		}
-		break;
-
-	case GSENSOR_IOCTL_READ_RAW_DATA:
-		data = (void __user *)arg;
-		if (data == NULL) {
-			err = -EINVAL;
-			break;
-		}
-		STK8BAXX_ReadRawData(client, strbuf);
-		if (copy_to_user(data, &strbuf, strlen(strbuf) + 1)) {
-			err = -EFAULT;
-			break;
-		}
-		break;
-
-	case GSENSOR_IOCTL_SET_CALI:
-		data = (void __user *)arg;
-		if (data == NULL) {
-			err = -EINVAL;
-			break;
-		}
-		if (copy_from_user(&sensor_data, data, sizeof(sensor_data))) {
-			err = -EFAULT;
-			break;
-		}
-		if (atomic_read(&obj->suspend)) {
-			GSE_ERR("Perform calibration in suspend state!!\n");
-			err = -EINVAL;
-		} else {
-			GSE_LOG("going to set cali\n");
-			cali[STK8BAXX_AXIS_X] =
-			    sensor_data.x * obj->reso->sensitivity / GRAVITY_EARTH_1000;
-			cali[STK8BAXX_AXIS_Y] =
-			    sensor_data.y * obj->reso->sensitivity / GRAVITY_EARTH_1000;
-			cali[STK8BAXX_AXIS_Z] =
-			    sensor_data.z * obj->reso->sensitivity / GRAVITY_EARTH_1000;
-			err = STK8BAXX_WriteCalibration(client, cali);
-			GSE_LOG
-			    ("GSENSOR_IOCTL_SET_CALI!!sensor_data .x =%d,sensor_data .z =%d,sensor_data .z =%d\n",
-			     sensor_data.x, sensor_data.y, sensor_data.z);
-		}
-		break;
-
-	case GSENSOR_IOCTL_CLR_CALI:
-		err = STK8BAXX_ResetCalibration(client);
-		break;
-
-	case GSENSOR_IOCTL_GET_CALI:
-		GSE_LOG("GSENSOR_IOCTL_GET_CALI\n");
-		data = (void __user *)arg;
-		if (data == NULL) {
-			err = -EINVAL;
-			break;
-		}
-		/* set low ODR to reduce noise */
-		STK8BAXX_SetDelay(client, 13333000);
-		GSE_LOG("%s: before STK8BAXX_ReadCalibration\n", __func__);
-		err = STK8BAXX_ReadCalibration(client, cali);
-		if (err)
-			break;
-
-		sensor_data.x = cali[STK8BAXX_AXIS_X] * GRAVITY_EARTH_1000 / obj->reso->sensitivity;
-		sensor_data.y = cali[STK8BAXX_AXIS_Y] * GRAVITY_EARTH_1000 / obj->reso->sensitivity;
-		sensor_data.z = cali[STK8BAXX_AXIS_Z] * GRAVITY_EARTH_1000 / obj->reso->sensitivity;
-		GSE_LOG
-		    ("%s:cali data [STK8BAXX_AXIS_X] = %d cali[STK8BAXX_AXIS_Y] = %d cali[STK8BAXX_AXIS_Z] = %d\n",
-		     __func__, cali[STK8BAXX_AXIS_X], cali[STK8BAXX_AXIS_Y], cali[STK8BAXX_AXIS_Z]);
-		if (copy_to_user(data, &sensor_data, sizeof(sensor_data))) {
-			err = -EFAULT;
-			break;
-		}
-		break;
-
-	default:
-		GSE_ERR("unknown IOCTL: 0x%08x\n", cmd);
-		err = -ENOIOCTLCMD;
-		break;
-	}
-
+	mutex_unlock(&STK8BA5X_i2c_mutex);
 	return err;
 }
 
-/*----------------------------------------------------------------------------*/
-static const struct file_operations stk8baxx_fops = {
-	/* .owner = THIS_MODULE, */
-	.open = stk8baxx_open,
-	.release = stk8baxx_release,
-	.unlocked_ioctl = stk8baxx_unlocked_ioctl,
-};
 
-/*----------------------------------------------------------------------------*/
-static struct miscdevice stk8baxx_device = {
-	.minor = MISC_DYNAMIC_MINOR,
-	.name = "gsensor",
-	.fops = &stk8baxx_fops,
-};
-
-static int stk8baxx_suspend(struct i2c_client *client, pm_message_t msg)
+/**
+ * stk8baxx register read
+ * @brief: Register reading via I2C
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ * @param[in] reg: Register address
+ * @param[in] len: 0, for normal usage. Others, read length.
+ * @param[out] val: Data, the register what you want to read.
+ *
+ * @return: Success or fail
+ *          0: Success
+ *          others: Fail
+ */
+static int stk8baxx_reg_read(struct stk8baxx_data *stk, u8 reg, int len, u8 *val)
 {
-	struct stk8baxx_i2c_data *obj = i2c_get_clientdata(client);
-	int err = 0;
-
-	GSE_FUN();
-
-	if (msg.event == PM_EVENT_SUSPEND) {
-		if (obj == NULL) {
-			GSE_ERR("null pointer!!\n");
-			return -EINVAL;
-		}
-		atomic_set(&obj->suspend, 1);
-
-#ifndef CONFIG_CUSTOM_KERNEL_SENSORHUB
-		err = STK8BAXX_SetPowerMode(obj->client, false);
-#else				/* #ifndef CONFIG_CUSTOM_KERNEL_SENSORHUB */
-		err = STK8BAXX_SCP_SetPowerMode(false, ID_ACCELEROMETER);
-#endif				/* #ifndef CONFIG_CUSTOM_KERNEL_SENSORHUB */
-		if (err) {
-			GSE_ERR("write power control fail!!\n");
-			return err;
-		}
-	}
-	return err;
-}
-
-/*----------------------------------------------------------------------------*/
-static int stk8baxx_resume(struct i2c_client *client)
-{
-	struct stk8baxx_i2c_data *obj = i2c_get_clientdata(client);
+	u8 beg = reg;
+	int length = 0;
 	int err;
+	struct i2c_msg msgs[2] = {{0}, {0} };
 
-	GSE_FUN();
-
-	if (obj == NULL) {
-		GSE_ERR("null pointer!!\n");
+	if (!stk->client)
 		return -EINVAL;
+	else if (len > C_I2C_FIFO_SIZE) {
+			STK_ACC_ERR(" length %d exceeds %d\n", len, C_I2C_FIFO_SIZE);
+			//mutex_unlock(&STK8BA5X_i2c_mutex);
+			return -EINVAL;
 	}
 
-	atomic_set(&obj->suspend, 0);
-#ifndef CONFIG_CUSTOM_KERNEL_SENSORHUB
-	err = stk8baxx_init_client(client, 0);
-#else
-	err = STK8BAXX_SCP_SetPowerMode(enable_status, ID_ACCELEROMETER);
-#endif
-	if (err) {
-		GSE_ERR("initialize client fail!!\n");
-		atomic_set(&obj->suspend, 1);
-		return err;
+	mutex_lock(&STK8BA5X_i2c_mutex);
+	if(len == 0){
+		length = 1;
 	}
 
-	err = STK8BAXX_SetPowerMode(client, true);
-	if (err) {
-		GSE_ERR("SetPowerMode client fail!!\n");
-		atomic_set(&obj->suspend, 1);
-		return err;
-	}
-	/* atomic_set(&obj->suspend, 0); */
+	msgs[0].addr = stk->client->addr;
+	msgs[0].flags = 0;
+	msgs[0].len = 1;
+	msgs[0].buf = &beg;
 
-	return 0;
+	msgs[1].addr = stk->client->addr;
+	msgs[1].flags = I2C_M_RD;
+	msgs[1].len = length;
+	msgs[1].buf = val;
+
+	err = i2c_transfer(stk->client->adapter, msgs, sizeof(msgs)/sizeof(msgs[0]));
+	if (err != 2) {
+		STK_ACC_ERR("i2c_transfer error: (%d %p %d) %d\n", reg, val, len, err);
+		err = -EIO;
+	} else
+		err = 0;
+
+	mutex_unlock(&STK8BA5X_i2c_mutex);
+	
+	return err;
+
 }
 
-/*----------------------------------------------------------------------------*/
 
+/**
+ * @brief: Read PID and write to stk8baxx_data.pid.
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ *
+ * @return: Success or fail.
+ *          0: Success
+ *          others: Fail
+ */
+static int stk_get_pid(struct stk8baxx_data *stk)
+{
+    int error = 0;
+    u8 val = 0;
+    error = stk8baxx_reg_read(stk, STK8BAXX_REG_CHIPID, 0, &val);
 
-/*----------------------------------------------------------------------------*/
-/* if use  this typ of enable , Gsensor should report inputEvent(x, y, z ,stats, div) to HAL */
+    if (error)
+        STK_ACC_ERR("failed to read PID");
+    else
+        stk->pid = (int)val;
+
+    return error;
+}
+
+/**
+ * @brief: Initialize some data in stk8baxx_data.
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ */
+static void stk_data_initialize(struct stk8baxx_data *stk)
+{
+    atomic_set(&stk->enabled, 0);
+    atomic_set(&stk->enabled_for_acc, 0);
+    atomic_set(&stk->cali_status, STK_K_NO_CALI);
+    atomic_set(&stk->recv, 0);
+    stk->power_mode = STK8BAXX_PWMD_SUSPEND;
+    stk->temp_enable = false;
+#ifdef STK_FIR
+    memset(&stk->fir, 0, sizeof(struct data_fir));
+    atomic_set(&stk->fir_len, STK_FIR_LEN);
+#endif /* STK_FIR */
+}
+
+/**
+ * @brief: SW reset for stk8baxx
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ *
+ * @return: Success or fail.
+ *          0: Success
+ *          others: Fail
+ */
+static int stk_sw_reset(struct stk8baxx_data *stk)
+{
+    int error = 0;
+    error = stk8baxx_reg_write(stk, STK8BAXX_REG_SWRST, STK8BAXX_SWRST_VAL);
+
+    if (error)
+        return error;
+
+    usleep_range(1000, 2000);
+    return 0;
+}
+
+/**
+ * @brief: Change power mode
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ * @param[in] pwd_md: power mode for STK8BAXX_REG_POWMODE
+ *              STK8BAXX_PWMD_SUSPEND
+ *              STK8BAXX_PWMD_LOWPOWER
+ *              STK8BAXX_PWMD_NORMAL
+ *
+ * @return: Success or fail
+ *          0: Success
+ *          others: Fail
+ */
+static int stk_change_power_mode(struct stk8baxx_data *stk, u8 pwd_md)
+{
+    if (pwd_md != stk->power_mode)
+    {
+        int error = 0;
+        u8 val = 0;
+        error = stk8baxx_reg_read(stk, STK8BAXX_REG_POWMODE, 0, &val);
+
+        if (error)
+            return error;
+
+        val &= STK8BAXX_PWMD_SLP_MASK;
+        error = stk8baxx_reg_write(stk, STK8BAXX_REG_POWMODE, (val | pwd_md));
+
+        if (error)
+            return error;
+
+        stk->power_mode = pwd_md;
+    }
+    else
+        STK_ACC_LOG("Same as original power mode: 0x%X\n", stk->power_mode);
+
+    return 0;
+}
+
+/**
+ * @brief: Get sensitivity. Set result to stk8baxx_data.sensitivity.
+ *          sensitivity = number bit per G (LSB/g)
+ *          Example: RANGESEL=8g, 12 bits for STK832x full resolution
+ *          Ans: number bit per G = 2^12 / (8x2) = 256 (LSB/g)
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ */
+static void stk_get_sensitivity(struct stk8baxx_data *stk)
+{
+    u8 val = 0;
+    stk->sensitivity = 0;
+
+    if ( 0 == stk8baxx_reg_read(stk, STK8BAXX_REG_RANGESEL, 0, &val))
+    {
+        val &= STK8BAXX_RANGESEL_BW_MASK;
+
+        if (STK8BA53_ID == stk->pid)
+        {
+            switch (val)
+            {
+                case STK8BAXX_RANGESEL_2G:
+                    stk->sensitivity = 1024;
+                    break;
+
+                case STK8BAXX_RANGESEL_4G:
+                    stk->sensitivity = 512;
+                    break;
+
+                case STK8BAXX_RANGESEL_8G:
+                    stk->sensitivity = 256;
+                    break;
+
+                default:
+                    break;
+            }
+        }
+        else
+        {
+            switch (val)
+            {
+                case STK8BAXX_RANGESEL_2G:
+                    stk->sensitivity = 256;
+                    break;
+
+                case STK8BAXX_RANGESEL_4G:
+                    stk->sensitivity = 128;
+                    break;
+
+                case STK8BAXX_RANGESEL_8G:
+                    stk->sensitivity = 64;
+                    break;
+
+                default:
+                    break;
+            }
+        }
+    }
+}
+
+/**
+ * @brief: Set range
+ *          1. Setting STK8BAXX_REG_RANGESEL
+ *          2. Calculate sensitivity and store to stk8baxx_data.sensitivity
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ * @param[in] range: range for STK8BAXX_REG_RANGESEL
+ *              STK8BAXX_RANGESEL_2G
+ *              STK8BAXX_RANGESEL_4G
+ *              STK8BAXX_RANGESEL_8G
+ *
+ * @return: Success or fail
+ *          0: Success
+ *          others: Fail
+ */
+static int stk_range_selection(struct stk8baxx_data *stk, u8 range)
+{
+    int result = 0;
+    result = stk8baxx_reg_write(stk, STK8BAXX_REG_RANGESEL, range);
+
+    if (result)
+        return result;
+
+    stk_get_sensitivity(stk);
+    return 0;
+}
+
+/**
+ * stk_set_enable
+ * @brief: Turn ON/OFF the power state of stk8baxx.
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ * @param[in] en: turn ON/OFF
+ *              0 for suspend mode;
+ *              1 for normal mode.
+ */
+static void stk_set_enable(struct stk8baxx_data *stk, char en)
+{
+    if (en == atomic_read(&stk->enabled))
+        return;
+
+    if (en)
+    {
+        /* ID46: Low-power -> Suspend -> Normal */
+        if (stk_change_power_mode(stk, STK8BAXX_PWMD_SUSPEND))
+            return;
+
+        if (stk_change_power_mode(stk, STK8BAXX_PWMD_NORMAL))
+            return;
+
+#ifndef INTERRUPT_MODE /* polling mode */
+        //hrtimer_start(&stk->accel_timer, stk->poll_delay, HRTIMER_MODE_REL);
+#endif /* no INTERRUPT_MODE */
+#ifdef STK_CHECK_CODE
+        stk->cc_count = 0;
+        stk->cc_status = STK_CCSTATUS_NORMAL;
+#endif /* STK_CHECK_CODE */
+    }
+    else
+    {
+        if (stk_change_power_mode(stk, STK8BAXX_PWMD_SUSPEND))
+            return;
+
+#ifndef INTERRUPT_MODE /* polling mode */
+        //hrtimer_cancel(&stk->accel_timer);
+#endif /* no INTERRUPT_MODE */
+    }
+
+    atomic_set(&stk->enabled, en);
+}
+
+/**
+ * @brief: Get delay
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ *
+ * @return: delay in usec
+ *          Please refer STK8BAXX_SAMPLE_TIME[]
+ */
+static int stk_get_delay(struct stk8baxx_data *stk)
+{
+    u8 data = 0;
+    int delay_us = 0;
+
+    if (stk8baxx_reg_read(stk, STK8BAXX_REG_BWSEL, 0, &data))
+    {
+        STK_ACC_ERR("failed to read delay");
+    }
+    else if ((STK8BAXX_SPTIME_BASE > data) || (STK8BAXX_SPTIME_BOUND < data))
+    {
+        STK_ACC_ERR("BW out of range, 0x%X", data);
+    }
+    else
+    {
+        delay_us = STK8BAXX_SAMPLE_TIME[data - STK8BAXX_SPTIME_BASE];
+    }
+
+    return delay_us;
+}
+
+/**
+ * @brief: Set delay
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ * @param[in] delay_us: delay in usec
+ *
+ * @return: Success or fail
+ *          0: Success
+ *          others: Fail
+ */
+static int stk_set_delay(struct stk8baxx_data *stk, int delay_us)
+{
+    int error = 0;
+    bool enable = false;
+    unsigned char sr_no;
+
+    for (sr_no = 0; sr_no <= STK8BAXX_SPTIME_BOUND - STK8BAXX_SPTIME_BASE;
+         sr_no++)
+        if (delay_us >= STK8BAXX_SAMPLE_TIME[sr_no])
+            break;
+
+    if (sr_no == STK8BAXX_SPTIME_BOUND - STK8BAXX_SPTIME_BASE + 1)
+    {
+        sr_no--;
+        //delay_us = STK8BAXX_SAMPLE_TIME[sr_no];
+    }
+
+    sr_no += STK8BAXX_SPTIME_BASE;
+
+    if (atomic_read(&stk->enabled))
+    {
+        stk_set_enable(stk, 0);
+        enable = true;
+    }
+
+    error = stk8baxx_reg_write(stk, STK8BAXX_REG_BWSEL, sr_no);
+
+    if (error)
+        STK_ACC_ERR("failed to change ODR");
+
+    if (enable)
+    {
+        stk_set_enable(stk, 1);
+    }
+
+#ifndef INTERRUPT_MODE /* polling mode */
+    stk->poll_delay = ns_to_ktime(
+                          STK8BAXX_SAMPLE_TIME[sr_no - STK8BAXX_SPTIME_BASE] * NSEC_PER_USEC);
+#endif /* no INTERRUPT_MODE */
+    return error;
+}
+
+#ifdef STK_CHECK_CODE
+/**
+ * @brief: check stiction or not
+ *          If 3 times and continue stiction will change stk8baxx_data.cc_status
+ *          to STK_CCSTATUS_ZSIM or STK_CCSTATUS_XYZIM.
+ *          Others, keep stk8baxx_data.cc_status to STK_CCSTATUS_NORMAL.
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ * @param[in] clean: clean internal flag of check_result or not.
+ *                  true: clean check_result
+ *                  false: don't clean check_result
+ */
+static void stk_check_data(struct stk8baxx_data *stk, bool clean)
+{
+    static s8 event_no = 0;
+    static s8 check_result = 0;
+    /* 12 bits per axis */
+    const int max_value = 2047;
+    const int min_value = -2048;
+
+    if (18 <= event_no)
+        return;
+
+    if (max_value == stk->xyz[0] || min_value == stk->xyz[0]
+        || max_value == stk->xyz[1] || min_value == stk->xyz[1]
+        || max_value == stk->xyz[2] || min_value == stk->xyz[2])
+    {
+        STK_ACC_LOG("acc:0x%X, 0x%X, 0x%X\n", stk->xyz[0], stk->xyz[1], stk->xyz[2]);
+        check_result++;
+    }
+    else
+    {
+        check_result = 0;
+        goto exit;
+    }
+
+    if (clean)
+    {
+        if (3 <= check_result)
+        {
+            if (max_value != stk->xyz[0] && min_value != stk->xyz[0]
+                && max_value != stk->xyz[1] && min_value != stk->xyz[1])
+                stk->cc_status = STK_CCSTATUS_ZSIM;
+            else
+                stk->cc_status = STK_CCSTATUS_XYSIM;
+
+            STK_ACC_LOG("incorrect reading");
+        }
+
+        check_result = 0;
+    }
+
+exit:
+    event_no++;
+    return;
+}
+
+/**
+ * @brief: check_code operation
+ *          z = sqrt(x^2 + y^2)
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ */
+static void stk_check_code(struct stk8baxx_data *stk)
+{
+    u16 x, y;
+    int sen, item;
+    sen = stk->sensitivity;
+
+    if (0 <= stk->xyz[0])
+        x = stk->xyz[0];
+    else
+        x = -stk->xyz[0];
+
+    if (0 <= stk->xyz[1])
+        y = stk->xyz[1];
+    else
+        y = -stk->xyz[1];
+
+    if ((x >= sen) || (y >= sen))
+    {
+        stk->xyz[2] = 0;
+        return;
+    }
+
+    switch (sen)
+    {
+        case 1024:
+            /* 2G */
+            item = (x >> 1) * sen + (y >> 1);
+
+            if (stkCheckCode_4g[item])
+                stk->xyz[2] = (s16)stkCheckCode_4g[item];
+            else
+            {
+                stk->xyz[2] = 0;
+                STK_ACC_ERR("null point for stkCheckCode_4g[%d][%d]", x, y);
+            }
+
+            break;
+
+        case 512:
+            /* 4G */
+            item = x * sen + y;
+
+            if (stkCheckCode_4g[item])
+                stk->xyz[2] = (s16)stkCheckCode_4g[item];
+            else
+            {
+                stk->xyz[2] = 0;
+                STK_ACC_ERR("null point for stkCheckCode_4g[%d][%d]", x, y);
+            }
+
+            break;
+
+        case 256:
+            /*8G */
+            item = (x << 1) * sen + (y << 1);
+
+            if (stkCheckCode_4g[item])
+                stk->xyz[2] = (s16)stkCheckCode_4g[item];
+            else
+            {
+                stk->xyz[2] = 0;
+                STK_ACC_ERR("null point for stkCheckCode_4g[%d][%d]", x, y);
+            }
+
+            break;
+
+        default:
+            STK_ACC_ERR("failed. sen=%d, x=%d, y=%d\n", sen, stk->xyz[0], stk->xyz[1]);
+            stk->xyz[2] = 0;
+            break;
+    }
+}
+#endif /* STK_CHECK_CODE */
+
+#ifdef STK_FIR
+/**
+ * @brief: low-pass filter operation
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ */
+static void stk_low_pass_fir(struct stk8baxx_data *stk)
+{
+    int firlength = atomic_read(&stk->fir_len);
+#ifdef STK_ZG
+    s16 avg;
+    int jitter_boundary = stk->sensitivity / 128;
+#if 0
+
+    if (0 == jitter_boundary)
+        jitter_boundary = 1;
+
+#endif
+#endif /* STK_ZG */
+
+    if (0 == firlength)
+    {
+        /* stk8baxx_data.fir_len == 0: turn OFF FIR operation */
+		STK_ACC_LOG("fir_len = 0");
+        return;
+    }
+
+    if (firlength > stk->fir.count)
+    {
+        stk->fir.xyz[stk->fir.idx][0] = stk->xyz[0];
+        stk->fir.xyz[stk->fir.idx][1] = stk->xyz[1];
+        stk->fir.xyz[stk->fir.idx][2] = stk->xyz[2];
+        stk->fir.sum[0] += stk->xyz[0];
+        stk->fir.sum[1] += stk->xyz[1];
+        stk->fir.sum[2] += stk->xyz[2];
+        stk->fir.count++;
+        stk->fir.idx++;
+    }
+    else
+    {
+        if (firlength <= stk->fir.idx)
+            stk->fir.idx = 0;
+    
+        stk->fir.sum[0] -= stk->fir.xyz[stk->fir.idx][0];
+        stk->fir.sum[1] -= stk->fir.xyz[stk->fir.idx][1];
+        stk->fir.sum[2] -= stk->fir.xyz[stk->fir.idx][2];
+        stk->fir.xyz[stk->fir.idx][0] = stk->xyz[0];
+        stk->fir.xyz[stk->fir.idx][1] = stk->xyz[1];
+        stk->fir.xyz[stk->fir.idx][2] = stk->xyz[2];
+        stk->fir.sum[0] += stk->xyz[0];
+        stk->fir.sum[1] += stk->xyz[1];
+        stk->fir.sum[2] += stk->xyz[2];
+		
+		stk->fir.idx++;
+		
+#ifdef STK_ZG
+        avg = stk->fir.sum[0] / firlength;
+
+        if (abs(avg) <= jitter_boundary)
+            stk->xyz[0] = (avg * ZG_FACTOR) / firlength;
+        else
+            stk->xyz[0] = avg / firlength;
+
+        avg = stk->fir.sum[1] / firlength;
+
+        if (abs(avg) <= jitter_boundary)
+            stk->xyz[1] = (avg * ZG_FACTOR) / firlength;
+        else
+            stk->xyz[1] = avg / firlength;
+
+        avg = stk->fir.sum[2] / firlength;
+
+        if (abs(avg) <= jitter_boundary)
+            stk->xyz[2] = (avg * ZG_FACTOR) / firlength;
+        else
+            stk->xyz[2] = avg / firlength;
+
+#else /* STK_ZG */
+        stk->xyz[0] = stk->fir.sum[0] / firlength;
+        stk->xyz[1] = stk->fir.sum[1] / firlength;
+        stk->xyz[2] = stk->fir.sum[2] / firlength;
+#endif /* STK_ZG */
+    }
+}
+#endif /* STK_FIR */
+
+/**
+ * @brief: read accel raw data from register.
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ */
+static void stk_read_accel_rawdata(struct stk8baxx_data *stk)
+{
+    u8 dataL = 0;
+    u8 dataH = 0;
+
+    if (stk8baxx_reg_read(stk, STK8BAXX_REG_XOUT1, 0, &dataL))
+        return;
+
+    if (stk8baxx_reg_read(stk, STK8BAXX_REG_XOUT2, 0, &dataH))
+        return;
+
+    stk->xyz[0] = dataH << 8 | dataL;
+	
+	STK_ACC_LOG("raw data:x:0x%x, dataH:0x%x, dataL:0x%x\n", stk->xyz[0], dataH, dataL);
+	
+    if (STK8BA53_ID == stk->pid)
+        stk->xyz[0] >>= 4;
+    else
+        stk->xyz[0] >>= 6;
+
+    if (stk8baxx_reg_read(stk, STK8BAXX_REG_YOUT1, 0, &dataL))
+        return;
+
+    if (stk8baxx_reg_read(stk, STK8BAXX_REG_YOUT2, 0, &dataH))
+        return;
+
+    stk->xyz[1] = dataH << 8 | dataL;
+	STK_ACC_LOG("raw data:y:0x%x, dataH:0x%x, dataL:0x%x\n", stk->xyz[1], dataH, dataL);
+    if (STK8BA53_ID == stk->pid)
+        stk->xyz[1] >>= 4;
+    else
+        stk->xyz[1] >>= 6;
+
+    if (stk8baxx_reg_read(stk, STK8BAXX_REG_ZOUT1, 0, &dataL))
+        return;
+
+    if (stk8baxx_reg_read(stk, STK8BAXX_REG_ZOUT2, 0, &dataH))
+        return;
+
+    stk->xyz[2] = dataH << 8 | dataL;
+	STK_ACC_LOG("raw data:z:0x%x, dataH:0x%x, dataL:0x%x\n", stk->xyz[2], dataH, dataL);
+    if (STK8BA53_ID == stk->pid)
+        stk->xyz[2] >>= 4;
+    else
+        stk->xyz[2] >>= 6;
+
+	STK_ACC_LOG(" >> 6 data:x:0x%x, y:0x%x, z:0x%x\n", stk->xyz[0], stk->xyz[1], stk->xyz[2]);
+	STK_ACC_LOG(" >> 6 data:x:%d, y:%d, z:%d, pid=0x%x\n", stk->xyz[0], stk->xyz[1], stk->xyz[2], stk->pid);
+	
+}
+
+/**
+ * @brief: read accel data from register.
+ *          Store result to stk8baxx_data.xyz[].
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ */
+static void stk_read_accel_data(struct stk8baxx_data *stk)
+{
+    stk_read_accel_rawdata(stk);
+#ifdef STK_CHECK_CODE
+
+    if ((STK_CHECKCODE_IGNORE + 1) == stk->cc_count
+        || (STK_CHECKCODE_IGNORE + 2) == stk->cc_count)
+        stk_check_data(stk, false);
+    else if ((STK_CHECKCODE_IGNORE + 3) == stk->cc_count)
+        stk_check_data(stk, true);
+    else if (STK_CCSTATUS_ZSIM == stk->cc_status)
+        stk_check_code(stk);
+
+    if ((STK_CHECKCODE_IGNORE + 6) > stk->cc_count)
+        stk->cc_count++;
+
+#endif /* STK_CHECK_CODE */
+#ifdef STK_FIR
+    stk_low_pass_fir(stk);
+#endif /* STK_FIR */
+}
+
+/**
+ * @brief: Write calibration config file to STK_CALI_FILE.
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ * @param[in] w_buf: cali data what want to write to STK_CALI_FILE.
+ * @param[in] buf_size: size of w_buf.
+ *
+ * @return: Success or fail
+ *          0: Success
+ *          others: Fail
+ */
+static int stk_write_to_file(struct stk8baxx_data *stk,
+                             char *w_buf, int8_t buf_size)
+{
+    struct file *cali_file;
+    char r_buf[buf_size];
+    mm_segment_t fs;
+    ssize_t ret;
+    int i;
+    cali_file = filp_open(STK_CALI_FILE, O_CREAT | O_RDWR, 0666);
+
+    if (IS_ERR(cali_file))
+    {
+        STK_ACC_ERR("err=%ld, failed to open %s", PTR_ERR(cali_file), STK_CALI_FILE);
+        return -ENOENT;
+    }
+    else
+    {
+        fs = get_fs();
+        set_fs(get_ds());
+        ret = cali_file->f_op->write(cali_file, w_buf, buf_size,
+                                     &cali_file->f_pos);
+
+        if (0 > ret)
+        {
+            STK_ACC_ERR("write error, ret=%d", (int)ret);
+            filp_close(cali_file, NULL);
+            return -EIO;
+        }
+
+        cali_file->f_pos = 0x0;
+        ret = cali_file->f_op->read(cali_file, r_buf, buf_size,
+                                    &cali_file->f_pos);
+
+        if (0 > ret)
+        {
+            STK_ACC_ERR("read error, ret=%d", (int)ret);
+            filp_close(cali_file, NULL);
+            return -EIO;
+        }
+
+        set_fs(fs);
+
+        for (i = 0; i < buf_size; i++)
+        {
+            if (r_buf[i] != w_buf[i])
+            {
+                STK_ACC_ERR("read back error! r_buf[%d]=0x%X, w_buf[%d]=0x%X", i, r_buf[i], i, w_buf[i]);
+                filp_close(cali_file, NULL);
+                return -1;
+            }
+        }
+    }
+
+    filp_close(cali_file, NULL);
+    return 0;
+}
+
+/**
+ * @brief: Get calibration config file from STK_CALI_FILE.
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ * @param[out] r_buf: cali data what want to read from STK_CALI_FILE.
+ * @param[in] buf_size: size of r_buf.
+ *
+ * @return: Success or fail
+ *          0: Success
+ *          others: Fail
+ */
+static int stk_get_from_file(struct stk8baxx_data *stk,
+                             char *r_buf, int8_t buf_size)
+{
+    struct file *cali_file;
+    mm_segment_t fs;
+    ssize_t ret;
+    cali_file = filp_open(STK_CALI_FILE, O_RDONLY, 0);
+
+    if (IS_ERR(cali_file))
+    {
+        STK_ACC_ERR("err=%ld, failed to open %s", PTR_ERR(cali_file), STK_CALI_FILE);
+        return -ENOENT;
+    }
+    else
+    {
+        fs = get_fs();
+        set_fs(get_ds());
+        ret = cali_file->f_op->read(cali_file, r_buf, buf_size,
+                                    &cali_file->f_pos);
+        set_fs(fs);
+
+        if (0 > ret)
+        {
+            STK_ACC_ERR("read error, ret=%d\n", (int)ret);
+            filp_close(cali_file, NULL);
+            return -EIO;
+        }
+    }
+
+    filp_close(cali_file, NULL);
+    return 0;
+}
+
+/**
+ * @brief:
+ */
+static void stk_get_cali(struct stk8baxx_data *stk, u8 cali[3])
+{
+    char stk_file[STK_CALI_FILE_SIZE];
+
+    if (stk_get_from_file(stk, stk_file, STK_CALI_FILE_SIZE) == 0)
+    {
+        if (STK_CALI_VER0 == stk_file[0]
+            && STK_CALI_VER1 == stk_file[1]
+            && STK_CALI_END == stk_file[STK_CALI_FILE_SIZE - 1])
+        {
+            atomic_set(&stk->cali_status, (int)stk_file[8]);
+            cali[0] = stk_file[3];
+            cali[1] = stk_file[5];
+            cali[2] = stk_file[7];
+            STK_ACC_LOG("offset:%d,%d,%d, mode=0x%X", stk_file[3], stk_file[5], stk_file[7], stk_file[8]);
+#if 0
+            STK_ACC_LOG("variance=%u,%u,%u",
+                        (stk_file[9] << 24 | stk_file[10] << 16 | stk_file[11] << 8 | stk_file[12]),
+                        (stk_file[13] << 24 | stk_file[14] << 16 | stk_file[15] << 8 | stk_file[16]),
+                        (stk_file[17] << 24 | stk_file[18] << 16 | stk_file[19] << 8 | stk_file[20]));
+#endif
+        }
+        else
+        {
+            int i;
+            STK_ACC_ERR("wrong cali version number");
+
+            for (i = 0; i < STK_CALI_FILE_SIZE; i++)
+                STK_ACC_LOG("cali_file[%d]=0x%X\n", i, stk_file[i]);
+        }
+    }
+}
+
+/**
+ * @brief: Get sample_no of samples then calculate average
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ * @param[in] delay_ms: delay in msec
+ * @param[in] sample_no: amount of sample
+ * @param[out] acc_ave: XYZ average
+ */
+static void stk_calculate_average(struct stk8baxx_data *stk,
+                                  unsigned int delay_ms, int sample_no, int acc_ave[3])
+{
+    int i;
+
+    for (i = 0; i < sample_no; i++)
+    {
+        msleep(delay_ms);
+        stk_read_accel_data(stk);
+        acc_ave[0] += stk->xyz[0];
+        acc_ave[1] += stk->xyz[1];
+        acc_ave[2] += stk->xyz[2];
+    }
+
+    /*
+     * Take ceiling operation.
+     * ave = (ave + SAMPLE_NO/2) / SAMPLE_NO
+     *     = ave/SAMPLE_NO + 1/2
+     * Example: ave=7, SAMPLE_NO=10
+     * Ans: ave = 7/10 + 1/2 = (int)(1.2) = 1
+     */
+    for (i = 0; i < 3; i++)
+    {
+        if ( 0 <= acc_ave[i])
+            acc_ave[i] = (acc_ave[i] + sample_no / 2) / sample_no;
+        else
+            acc_ave[i] = (acc_ave[i] - sample_no / 2) / sample_no;
+    }
+
+    /*
+     * For Z-axis
+     * Pre-condition: Sensor be put on a flat plane, with +z face up.
+     */
+    if (0 < acc_ave[2])
+        acc_ave[2] -= stk->sensitivity;
+    else
+        acc_ave[2] += stk->sensitivity;
+}
+
+/**
+ * @brief: Align STK8BAXX_REG_OFSTx sensitivity with STK8BAXX_REG_RANGESEL
+ *  Description:
+ *  Example:
+ *      RANGESEL=0x3 -> +-2G / 12bits for STK832x full resolution
+ *              number bit per G = 2^12 / (2x2) = 1024 (LSB/g)
+ *              (2x2) / 2^12 = 0.97 mG/bit
+ *      OFSTx: There are 8 bits to describe OFSTx for +-1G
+ *              number bit per G = 2^8 / (1x2) = 128 (LSB/g)
+ *              (1x2) / 2^8 = 7.8125mG/bit
+ *      Align: acc_OFST = acc * 128 / 1024
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ * @param[in/out] acc: accel data
+ *
+ */
+static void stk_align_offset_sensitivity(struct stk8baxx_data *stk, int acc[3])
+{
+    int axis;
+
+    /*
+     * Take ceiling operation.
+     * ave = (ave + SAMPLE_NO/2) / SAMPLE_NO
+     *     = ave/SAMPLE_NO + 1/2
+     * Example: ave=7, SAMPLE_NO=10
+     * Ans: ave = 7/10 + 1/2 = (int)(1.2) = 1
+     */
+    for (axis = 0; axis < 3; axis++)
+    {
+        if (acc[axis] > 0)
+        {
+            acc[axis] = (acc[axis] * STK8BAXX_OFST_LSB + stk->sensitivity / 2)
+                        / stk->sensitivity;
+        }
+        else
+        {
+            acc[axis] = (acc[axis] * STK8BAXX_OFST_LSB - stk->sensitivity / 2)
+                        / stk->sensitivity;
+        }
+    }
+}
+
+/**
+ * @brief: Read all register (0x0 ~ 0x3F)
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ * @param[out] show_buffer: record all register value
+ *
+ * @return: buffer length or fail
+ *          positive value: return buffer length
+ *          -1: Fail
+ */
+static int stk_show_all_reg(struct stk8baxx_data *stk, char *show_buffer)
+{
+    bool enable = false;
+    int reg;
+    int len = 0;
+    u8 data = 0;
+
+    if (NULL == show_buffer)
+        return -1;
+
+    if (!atomic_read(&stk->enabled))
+        stk_set_enable(stk, 1);
+    else
+        enable = true;
+
+    for (reg = 0; reg <= 0x3F; reg++)
+    {
+        if (stk8baxx_reg_read(stk, reg, 0, &data))
+        {
+            len = -1;
+            goto exit;
+        }
+
+        if (0 >= (PAGE_SIZE - len))
+        {
+            STK_ACC_ERR("print string out of PAGE_SIZE");
+            goto exit;
+        }
+
+        len += scnprintf(show_buffer + len, PAGE_SIZE - len,
+                         "[0x%2X]=0x%2X, ", reg, data);
+    }
+
+    len += scnprintf(show_buffer + len, PAGE_SIZE - len, "\n");
+exit:
+
+    if (!enable)
+        stk_set_enable(stk, 0);
+
+    return len;
+}
+
+/**
+ * @brief: Get offset
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ * @param[out] offset: offset value read from register
+ *                  STK8BAXX_REG_OFSTX,  STK8BAXX_REG_OFSTY, STK8BAXX_REG_OFSTZ
+ *
+ * @return: Success or fail
+ *          0: Success
+ *          -1: Fail
+ */
+static int stk_get_offset(struct stk8baxx_data *stk, u8 offset[3])
+{
+    int error = 0;
+    bool enable = false;
+
+    if (!atomic_read(&stk->enabled))
+        stk_set_enable(stk, 1);
+    else
+        enable = true;
+
+    if (stk8baxx_reg_read(stk, STK8BAXX_REG_OFSTX, 0, &offset[0]))
+    {
+        error = -1;
+        goto exit;
+    }
+
+    if (stk8baxx_reg_read(stk, STK8BAXX_REG_OFSTY, 0, &offset[1]))
+    {
+        error = -1;
+        goto exit;
+    }
+
+    if (stk8baxx_reg_read(stk, STK8BAXX_REG_OFSTZ, 0, &offset[2]))
+    {
+        error = -1;
+        goto exit;
+    }
+
+exit:
+
+    if (!enable)
+        stk_set_enable(stk, 0);
+
+    return error;
+}
+
+/**
+ * @brief: Set offset
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ * @param[in] offset: offset value write to register
+ *                  STK8BAXX_REG_OFSTX,  STK8BAXX_REG_OFSTY, STK8BAXX_REG_OFSTZ
+ *
+ * @return: Success or fail
+ *          0: Success
+ *          -1: Fail
+ */
+static int stk_set_offset(struct stk8baxx_data *stk, u8 offset[3])
+{
+    int error = 0;
+    bool enable = false;
+
+    if (!atomic_read(&stk->enabled))
+        stk_set_enable(stk, 1);
+    else
+        enable = true;
+
+    if (stk8baxx_reg_write(stk, STK8BAXX_REG_OFSTX, offset[0]))
+    {
+        error = -1;
+        goto exit;
+    }
+
+    if (stk8baxx_reg_write(stk, STK8BAXX_REG_OFSTY, offset[1]))
+    {
+        error = -1;
+        goto exit;
+    }
+
+    if (stk8baxx_reg_write(stk, STK8BAXX_REG_OFSTZ, offset[2]))
+    {
+        error = -1;
+        goto exit;
+    }
+
+exit:
+
+    if (!enable)
+        stk_set_enable(stk, 0);
+
+    return error;
+}
+
+/**
+ * @brief: Verify offset.
+ *          Read register of STK8BAXX_REG_OFSTx, then check data are the same as
+ *          what we wrote or not.
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ * @param[in] offset: offset value to compare with the value in register
+ *
+ * @return: Success or fail
+ *          0: Success
+ *          STK_K_FAIL_I2C: I2C error
+ *          STK_K_FAIL_WRITE_OFSET: offset value not the same as the value in
+ *                                  register
+ */
+static int stk_verify_offset(struct stk8baxx_data *stk, u8 offset[3])
+{
+    int axis;
+    u8 offset_from_reg[3] = {0, 0, 0};
+
+    if (stk_get_offset(stk, offset_from_reg))
+        return STK_K_FAIL_I2C;
+
+    for (axis = 0; axis < 3; axis++)
+    {
+        if (offset_from_reg[axis] != offset[axis])
+        {
+            STK_ACC_ERR("set OFST failed! offset[%d]=%d, read from reg[%d]=%d",
+                        axis, offset[axis], axis, offset_from_reg[axis]);
+            atomic_set(&stk->cali_status, STK_K_FAIL_WRITE_OFST);
+            return STK_K_FAIL_WRITE_OFST;
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * @brief: Write calibration data to config file
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ * @param[in] offset: offset value
+ * @param[in] status: status
+ *                  STK_K_SUCCESS_FILE
+ *
+ * @return: Success or fail
+ *          0: Success
+ *          -1: Fail
+ */
+static int stk_write_cali_to_file(struct stk8baxx_data *stk,
+                                  u8 offset[3], u8 status)
+{
+    char file_buf[STK_CALI_FILE_SIZE];
+    memset(file_buf, 0, sizeof(file_buf));
+    file_buf[0] = STK_CALI_VER0;
+    file_buf[1] = STK_CALI_VER1;
+    file_buf[3] = offset[0];
+    file_buf[5] = offset[1];
+    file_buf[7] = offset[2];
+    file_buf[8] = status;
+    file_buf[STK_CALI_FILE_SIZE - 2] = '\0';
+    file_buf[STK_CALI_FILE_SIZE - 1] = STK_CALI_END;
+
+    if (stk_write_to_file(stk, file_buf, STK_CALI_FILE_SIZE))
+        return -1;
+
+    return 0;
+}
+
+/**
+ * @brief: Calibration action
+ *          1. Calculate calibration data
+ *          2. Write data to STK8BAXX_REG_OFSTx
+ *          3. Check calibration well-done with chip register
+ *          4. Write calibration data to file
+ *          Pre-condition: Sensor be put on a flat plane, with +z face up.
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ * @param[in] delay_us: delay in usec
+ *
+ * @return: Success or fail
+ *          0: Success
+ *          STK_K_FAIL_I2C: I2C error
+ *          STK_K_FAIL_WRITE_OFSET: offset value not the same as the value in
+ *                                  register
+ *          STK_K_FAIL_W_FILE: fail during writing cali to file
+ */
+static int stk_cali_do(struct stk8baxx_data *stk, int delay_us)
+{
+    int error = 0;
+    int acc_ave[3] = {0, 0, 0};
+    unsigned int delay_ms = delay_us / 1000;
+    u8 offset[3] = {0, 0, 0};
+    int acc_verify[3] = {0, 0, 0};
+    const unsigned char verify_diff = stk->sensitivity / 10;
+    int axis;
+#ifdef STK_CHECK_CODE
+    msleep(delay_ms * STK_CHECKCODE_IGNORE);
+#endif /* STK_CHECK_CODE */
+    stk_calculate_average(stk, delay_ms, STK_CALI_SAMPLE_NO, acc_ave);
+    stk_align_offset_sensitivity(stk, acc_ave);
+
+    for (axis = 0; axis < 3; axis++)
+        offset[axis] = -acc_ave[axis];
+
+    STK_ACC_LOG("New offset for XYZ: %d, %d, %d\n", acc_ave[0], acc_ave[1], acc_ave[2]);
+    error = stk_set_offset(stk, offset);
+
+    if (error)
+        return STK_K_FAIL_I2C;
+
+    /* Read register, then check OFSTx are the same as we wrote or not */
+    error = stk_verify_offset(stk, offset);
+
+    if (error)
+        return error;
+
+    /* verify cali */
+    stk_calculate_average(stk, delay_ms, 3, acc_verify);
+
+    if (verify_diff < abs(acc_verify[0]) || verify_diff < abs(acc_verify[1])
+        || verify_diff < abs(acc_verify[2]))
+    {
+        STK_ACC_ERR("Check data x:%d, y:%d, z:%d. Check failed!",
+                    acc_verify[0], acc_verify[1], acc_verify[2]);
+        return STK_K_FAIL_VERIFY_CALI;
+    }
+
+    /* write cali to file */
+    error = stk_write_cali_to_file(stk, offset, STK_K_SUCCESS_FILE);
+
+    if (error)
+    {
+        STK_ACC_ERR("failed to stk_write_cali_to_file, error=%d", error);
+        return STK_K_FAIL_W_FILE;
+    }
+
+    atomic_set(&stk->cali_status, STK_K_SUCCESS_FILE);
+    return 0;
+}
+
+/**
+ * @brief: Set calibration
+ *          1. Change delay to 8000msec
+ *          2. Reset offset value by trigger OFST_RST
+ *          3. Calibration action
+ *          4. Change delay value back
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ */
+static void stk_set_cali(struct stk8baxx_data *stk)
+{
+    int error = 0;
+    bool enable;
+    int org_delay_us, real_delay_us;
+    atomic_set(&stk->cali_status, STK_K_RUNNING);
+    org_delay_us = stk_get_delay(stk);
+    /* Use several samples (with ODR:125) for calibration data base */
+    error = stk_set_delay(stk, 8000);
+
+    if (error)
+    {
+        STK_ACC_ERR("failed to stk_set_delay, error=%d", error);
+        atomic_set(&stk->cali_status, STK_K_FAIL_I2C);
+        return;
+    }
+
+    real_delay_us = stk_get_delay(stk);
+
+    /* SW reset before getting calibration data base */
+    if (atomic_read(&stk->enabled))
+    {
+        enable = true;
+        stk_set_enable(stk, 0);
+    }
+    else
+        enable = false;
+
+    stk_set_enable(stk, 1);
+    error = stk8baxx_reg_write(stk, STK8BAXX_REG_OFSTCOMP1,
+                              STK8BAXX_OFSTCOMP1_OFST_RST);
+
+    if (error)
+    {
+        atomic_set(&stk->cali_status, STK_K_FAIL_I2C);
+        goto exit_for_OFST_RST;
+    }
+
+    /* Action for calibration */
+    error = stk_cali_do(stk, real_delay_us);
+
+    if (error)
+    {
+        STK_ACC_ERR("failed to stk_cali_do, error=%d", error);
+        atomic_set(&stk->cali_status, error);
+        goto exit_for_OFST_RST;
+    }
+
+    STK_ACC_LOG("successful calibration");
+exit_for_OFST_RST:
+
+    if (!enable)
+        stk_set_enable(stk, 0);
+
+    stk_set_delay(stk, org_delay_us);
+}
+
+/**
+ * @brief: Reset calibration
+ *          1. Reset offset value by trigger OFST_RST
+ *          2. Calibration action
+ */
+static void stk_reset_cali(struct stk8baxx_data *stk)
+{
+	memset(stk->cali_sw, 0x00, sizeof(stk->cali_sw));
+	
+    stk8baxx_reg_write(stk, STK8BAXX_REG_OFSTCOMP1,
+            STK8BAXX_OFSTCOMP1_OFST_RST);
+    atomic_set(&stk->cali_status, STK_K_NO_CALI);
+}
+
+/**
+ * @brief: Get power status
+ *          Send 0 or 1 to userspace.
+ *
+ * @param[in] ddri: struct device_driver *
+ * @param[in] attr: struct device_attribute *
+ * @param[in/out] buf: char *
+ *
+ * @return: ssize_t
+ */
+static ssize_t stk_enable_show(struct device_driver *ddri, char *buf)
+{
+    struct stk8baxx_data *stk = stk_data;
+    char en;
+    en = atomic_read(&stk->enabled);
+    return scnprintf(buf, PAGE_SIZE, "%d\n", en);
+}
+
+/**
+ * @brief: Set power status
+ *          Get 0 or 1 from userspace, then set stk8baxx power status.
+ *
+ * @param[in] ddri: struct device_driver *
+ * @param[in/out] buf: char *
+ * @param[in] count: size_t
+ *
+ * @return: ssize_t
+ */
+static ssize_t stk_enable_store(struct device_driver *ddri, const char *buf, size_t count)
+{
+    struct stk8baxx_data *stk = stk_data;
+    unsigned int data;
+    int error;
+    error = kstrtouint(buf, 10, &data);
+
+    if (error)
+    {
+        STK_ACC_ERR("kstrtoul failed, error=%d", error);
+        return error;
+    }
+
+    if ((1 == data) || (0 == data))
+        stk_set_enable(stk, data);
+    else
+        STK_ACC_ERR("invalid argument, en=%d", data);
+
+    return count;
+}
+
+/**
+ * @brief: Get accel data
+ *          Send accel data to userspce.
+ *
+ * @param[in] ddri: struct device_driver *
+ * @param[in/out] buf: char *
+ *
+ * @return: ssize_t
+ */
+static ssize_t stk_value_show(struct device_driver *ddri, char *buf)
+{
+    struct stk8baxx_data *stk = stk_data;
+    bool enable = true;
+
+    if (!atomic_read(&stk->enabled))
+    {
+        stk_set_enable(stk, 1);
+        enable = false;
+    }
+
+    stk_read_accel_data(stk);
+
+    if (!enable)
+        stk_set_enable(stk, 0);
+
+    return scnprintf(buf, PAGE_SIZE, "%hd %hd %hd\n",
+                     stk->xyz[0], stk->xyz[1], stk->xyz[2]);
+}
+
+/**
+ * @brief: Get delay value in usec
+ *          Send delay in usec to userspce.
+ *
+ * @param[in] ddri: struct device_driver *
+ * @param[in/out] buf: char *
+ *
+ * @return: ssize_t
+ */
+static ssize_t stk_delay_show(struct device_driver *ddri, char *buf)
+{
+    struct stk8baxx_data *stk = stk_data;
+    return scnprintf(buf, PAGE_SIZE, "%lld\n", (long long)stk_get_delay(stk) * 1000);
+}
+
+/**
+ * @brief: Set delay value in usec
+ *          Get delay value in usec from userspace, then write to register.
+ *
+ * @param[in] ddri: struct device_driver *
+ * @param[in/out] buf: char *
+ * @param[in] count: size_t
+ *
+ * @return: ssize_t
+ */
+static ssize_t stk_delay_store(struct device_driver *ddri, const char *buf, size_t count)
+{
+    struct stk8baxx_data *stk = stk_data;
+    long long data;
+    int error;
+	int int32_delay_ns = 0;
+    error = kstrtoll(buf, 10, &data);
+
+    if (error)
+    {
+        STK_ACC_ERR("kstrtoul failed, error=%d", error);
+        return error;
+    }
+	int32_delay_ns = (int)(data>>10);
+    //stk_set_delay(stk, (int)(data / 1000));
+    STK_ACC_LOG("delay= %d ms, %lld", int32_delay_ns, data);	
+    stk_set_delay(stk, int32_delay_ns);
+    return count;
+}
+
+/**
+ * @brief: Get calibration status
+ *          Send calibration status to userspace.
+ *
+ * @param[in] ddri: struct device_driver *
+ * @param[in/out] buf: char *
+ *
+ * @return: ssize_t
+ */
+static ssize_t stk_cali_show(struct device_driver *ddri, char *buf)
+{
+    struct stk8baxx_data *stk = stk_data;
+    u8 cali[3] = {0, 0, 0};
+
+    if (STK_K_RUNNING != atomic_read(&stk->cali_status))
+        stk_get_cali(stk, cali);
+
+    return scnprintf(buf, PAGE_SIZE, "0x%02X\n", atomic_read(&stk->cali_status));
+}
+
+/**
+ * @brief: Trigger to calculate calibration data
+ *          Get 1 from userspace, then start to calculate calibration data.
+ *
+ * @param[in] ddri: struct device_driver *
+ * @param[in/out] buf: char *
+ * @param[in] count: size_t
+ *
+ * @return: ssize_t
+ */
+
+static ssize_t stk_direction_show(struct device_driver *ddri, char *buf)
+{
+    struct stk8baxx_data *stk = stk_data;
+
+	STK_ACC_LOG("direction:%d", stk->hw.direction);
+	
+    return scnprintf(buf, PAGE_SIZE, "%d\n", stk->hw.direction);
+}
+
+static ssize_t stk_direction_store(struct device_driver *ddri, const char *buf, size_t count)
+{
+	unsigned long position = 0;
+    struct stk8baxx_data *stk = stk_data;
+	int error = 0;
+	
+	STK_ACC_LOG("called");
+
+	position = simple_strtoul(buf, NULL,10);
+	
+	if ((position >= 0) && (position <= 7)) {
+		stk->hw.direction = position;
+	}
+
+	error = hwmsen_get_convert(stk->hw.direction, &stk->cvt);
+	
+    if (error){
+        STK_ACC_ERR("invalid direction: %d", stk->hw.direction);
+        return -EINVAL;
+    }
+
+    return count;	
+}
+
+static ssize_t stk_cali_store(struct device_driver *ddri, const char *buf, size_t count)
+{
+    struct stk8baxx_data *stk = stk_data;
+
+    if (sysfs_streq(buf, "1"))
+        stk_set_cali(stk);
+    else
+    {
+        STK_ACC_ERR("invalid value %d", *buf);
+        return -EINVAL;
+    }
+
+    return count;
+}
+
+/**
+ * @brief: Get offset value
+ *          Send X/Y/Z offset value to userspace.
+ *
+ * @param[in] ddri: struct device_driver *
+ * @param[in/out] buf: char *
+ *
+ * @return: ssize_t
+ */
+static ssize_t stk_offset_show(struct device_driver *ddri, char *buf)
+{
+    struct stk8baxx_data *stk = stk_data;
+    u8 offset[3] = {0, 0, 0};
+    stk_get_offset(stk, offset);
+    return scnprintf(buf, PAGE_SIZE, "0x%X 0x%X 0x%X\n",
+                     offset[0], offset[1], offset[2]);
+}
+
+/**
+ * @brief: Set offset value
+ *          Get X/Y/Z offset value from userspace, then write to register.
+ *
+ * @param[in] ddri: struct device_driver *
+ * @param[in/out] buf: char *
+ * @param[in] count: size_t
+ *
+ * @return: ssize_t
+ */
+static ssize_t stk_offset_store(struct device_driver *ddri, const char *buf, size_t count)
+{
+    struct stk8baxx_data *stk = stk_data;
+    char *token[10];
+    u8 r_offset[3];
+    int error, data, i;
+
+    for (i = 0; i < 3; i++)
+        token[i] = strsep((char **)&buf, " ");
+
+    error = kstrtoint(token[0], 16, &data);
+
+    if (error)
+    {
+        STK_ACC_ERR("kstrtoint failed, error=%d", error);
+        return error;
+    }
+
+    r_offset[0] = (u8)data;
+    error = kstrtoint(token[1], 16, &data);
+
+    if (error)
+    {
+        STK_ACC_ERR("kstrtoint failed, error=%d", error);
+        return error;
+    }
+
+    r_offset[1] = (u8)data;
+    error = kstrtoint(token[2], 16, &data);
+
+    if (error)
+    {
+        STK_ACC_ERR("kstrtoint failed, error=%d", error);
+        return error;
+    }
+
+    r_offset[2] = (u8)data;
+    STK_ACC_LOG("offset=0x%X, 0x%X, 0x%X", r_offset[0], r_offset[1], r_offset[2]);
+    stk_set_offset(stk, r_offset);
+    return count;
+}
+
+/**
+ * @brief: Register writting
+ *          Get address and content from userspace, then write to register.
+ *
+ * @param[in] ddri: struct device_driver *
+ * @param[in/out] buf: char *
+ * @param[in] count: size_t
+ *
+ * @return: ssize_t
+ */
+static ssize_t stk_send_store(struct device_driver *ddri, const char *buf, size_t count)
+{
+    struct stk8baxx_data *stk = stk_data;
+    char *token[10];
+    int addr, cmd, error, i;
+    bool enable = false;
+
+    for (i = 0; i < 2; i++)
+        token[i] = strsep((char **)&buf, " ");
+
+    error = kstrtoint(token[0], 16, &addr);
+
+    if (error)
+    {
+        STK_ACC_ERR("kstrtoint failed, error=%d", error);
+        return error;
+    }
+
+    error = kstrtoint(token[1], 16, &cmd);
+
+    if (error)
+    {
+        STK_ACC_ERR("kstrtoint failed, error=%d", error);
+        return error;
+    }
+
+    STK_ACC_LOG("write reg[0x%X]=0x%X", addr, cmd);
+
+    if (!atomic_read(&stk->enabled))
+        stk_set_enable(stk, 1);
+    else
+        enable = true;
+
+    if (stk8baxx_reg_write(stk, (u8)addr, (u8)cmd))
+    {
+        error = -1;
+        goto exit;
+    }
+
+exit:
+
+    if (!enable)
+        stk_set_enable(stk, 0);
+
+    if (error)
+        return -1;
+
+    return count;
+}
+
+/**
+ * @brief: Read stk8baxx_data.recv(from stk_recv_store), then send to userspace.
+ *
+ * @param[in] ddri: struct device_driver *
+ * @param[in/out] buf: char *
+ *
+ * @return: ssize_t
+ */
+static ssize_t stk_recv_show(struct device_driver *ddri, char *buf)
+{
+    struct stk8baxx_data *stk = stk_data;
+    return scnprintf(buf, PAGE_SIZE, "0x%X\n", atomic_read(&stk->recv));
+}
+
+/**
+ * @brief: Get the read address from userspace, then store the result to
+ *          stk8baxx_data.recv.
+ *
+ * @param[in] ddri: struct device_driver *
+ * @param[in/out] buf: char *
+ * @param[in] count: size_t
+ *
+ * @return: ssize_t
+ */
+static ssize_t stk_recv_store(struct device_driver *ddri, const char *buf, size_t count)
+{
+    struct stk8baxx_data *stk = stk_data;
+    int addr, error;
+    u8 data = 0;
+    bool enable = false;
+    error = kstrtoint(buf, 16, &addr);
+
+    if (error)
+    {
+        STK_ACC_ERR("kstrtoint failed, error=%d", error);
+        return error;
+    }
+
+    if (!atomic_read(&stk->enabled))
+        stk_set_enable(stk, 1);
+    else
+        enable = true;
+
+    if (stk8baxx_reg_read(stk, (u8)addr, 0, &data))
+    {
+        error = -1;
+        goto exit;
+    }
+
+    atomic_set(&stk->recv, data);
+    STK_ACC_LOG("read reg[0x%X]=0x%X", addr, data);
+exit:
+
+    if (!enable)
+        stk_set_enable(stk, 0);
+
+    if (error)
+        return -1;
+
+    return count;
+}
+
+/**
+ * @brief: Read all register value, then send result to userspace.
+ *
+ * @param[in] ddri: struct device_driver *
+ * @param[in/out] buf: char *
+ *
+ * @return: ssize_t
+ */
+static ssize_t stk_allreg_show(struct device_driver *ddri, char *buf)
+{
+    struct stk8baxx_data *stk = stk_data;
+    int result;
+    result = stk_show_all_reg(stk, buf);
+
+    if (0 >  result)
+        return result;
+
+    return (ssize_t)result;
+}
+
+/**
+ * @brief: Check PID, then send chip number to userspace.
+ *
+ * @param[in] ddri: struct device_driver *
+ * @param[in/out] buf: char *
+ *
+ * @return: ssize_t
+ */
+static ssize_t stk_chipinfo_show(struct device_driver *ddri, char *buf)
+{
+    struct stk8baxx_data *stk = stk_data;
+
+	STK_ACC_LOG("chip id=%d", stk->pid);
+    if (STK8BA53_ID == stk->pid)
+        return scnprintf(buf, PAGE_SIZE, "stk8ba53\n");
+    else if (STK8BA50_R_ID == stk->pid)
+        return scnprintf(buf, PAGE_SIZE, "stk8ba50-r\n");
+
+    return scnprintf(buf, PAGE_SIZE, "unknown\n");
+}
+
+#ifdef STK_FIR
+/**
+ * @brief: Get FIR parameter, then send to userspace.
+ *
+ * @param[in] ddri: struct device_driver *
+ * @param[in/out] buf: char *
+ *
+ * @return: ssize_t
+ */
+static ssize_t stk_firlen_show(struct device_driver *ddri, char *buf)
+{
+    struct stk8baxx_data *stk = stk_data;
+    int len = atomic_read(&stk->fir_len);
+
+    if (len)
+    {
+        STK_ACC_LOG("FIR count=%2d, idx=%2d", stk->fir.count, stk->fir.idx);
+        STK_ACC_LOG("sum = [\t%d \t%d \t%d]", stk->fir.sum[0], stk->fir.sum[1], stk->fir.sum[2]);
+        STK_ACC_LOG("avg = [\t%d \t%d \t%d]", stk->fir.sum[0] / len, stk->fir.sum[1] / len, stk->fir.sum[2] / len);
+    }
+
+    return scnprintf(buf, PAGE_SIZE, "%d\n", len);
+}
+
+/**
+ * @brief: Get FIR length from userspace, then write to stk8baxx_data.fir_len.
+ *
+ * @param[in] ddri: struct device_driver *
+ * @param[in/out] buf: char *
+ * @param[in] count: size_t
+ *
+ * @return: ssize_t
+ */
+static ssize_t stk_firlen_store(struct device_driver *ddri, const char *buf, size_t count)
+{
+    struct stk8baxx_data *stk = stk_data;
+    int firlen, error;
+    error = kstrtoint(buf, 10, &firlen);
+
+    if (error)
+    {
+        STK_ACC_ERR("kstrtoint failed, error=%d", error);
+        return error;
+    }
+
+    if (STK_FIR_LEN_MAX < firlen)
+        STK_ACC_ERR("maximum FIR length is %d", STK_FIR_LEN_MAX);
+    else
+    {
+        memset(&stk->fir, 0, sizeof(struct data_fir));
+        atomic_set(&stk->fir_len, firlen);
+    }
+
+    return count;
+}
+#endif /* STK_FIR */
+
+static DRIVER_ATTR(enable, 0664, stk_enable_show, stk_enable_store);
+static DRIVER_ATTR(value, 0444, stk_value_show, NULL);
+static DRIVER_ATTR(delay, 0664, stk_delay_show, stk_delay_store);
+static DRIVER_ATTR(cali, 0664, stk_cali_show, stk_cali_store);
+static DRIVER_ATTR(offset, 0664, stk_offset_show, stk_offset_store);
+static DRIVER_ATTR(send, 0220, NULL, stk_send_store);
+static DRIVER_ATTR(recv, 0664, stk_recv_show, stk_recv_store);
+static DRIVER_ATTR(allreg, 0444, stk_allreg_show, NULL);
+static DRIVER_ATTR(chipinfo, 0444, stk_chipinfo_show, NULL);
+#ifdef STK_FIR
+    static DRIVER_ATTR(firlen, 0664, stk_firlen_show, stk_firlen_store);
+#endif /* STK_FIR */
+static DRIVER_ATTR(direction, 0664, stk_direction_show, stk_direction_store);
+
+static struct driver_attribute *stk_attr_list[] =
+{
+    &driver_attr_enable,
+    &driver_attr_value,
+    &driver_attr_delay,
+    &driver_attr_cali,
+    &driver_attr_offset,
+    &driver_attr_send,
+    &driver_attr_recv,
+    &driver_attr_allreg,
+    &driver_attr_chipinfo,
+#ifdef STK_FIR
+    &driver_attr_firlen,
+#endif /* STK_FIR */
+    &driver_attr_direction,
+
+};
+
+/**
+ * @brief:
+ */
+static int stk_create_attr(struct device_driver *driver)
+{
+    int i, error = 0;
+    int num = (int)(sizeof(stk_attr_list) / sizeof(stk_attr_list[0]));
+
+    if (NULL == driver)
+        return -EINVAL;
+
+    for (i = 0; i < num; i++)
+    {
+        error = driver_create_file(driver, stk_attr_list[i]);
+
+        if (error)
+        {
+            STK_ACC_ERR("driver_create_file (%s) = %d",
+                        stk_attr_list[i]->attr.name, error);
+            break;
+        }
+    }
+
+    return error;
+}
+
+/**
+ * @brief:
+ */
+static void stk_create_attr_exit(struct device_driver *driver)
+{
+    int i;
+    int num = (int)(sizeof(stk_attr_list) / sizeof(stk_attr_list[0]));
+
+    if (NULL == driver)
+        return;
+
+    for (i = 0; i < num; i++)
+        driver_remove_file(driver, stk_attr_list[i]);
+}
+
+/**
+ * @brief:
+ */
+static void stk_report_accel_data(struct stk8baxx_data *stk)
+{
+#ifdef STK_CHECK_CODE
+
+    if ((STK_CCSTATUS_XYSIM == stk->cc_status)
+        || ((STK_CHECKCODE_IGNORE + 6) > stk->cc_count))
+        return;
+
+#endif /* STK_CHECK_CODE */
+    STK_ACC_LOG("x:%d, y:%d, z:%d", stk->xyz[0], stk->xyz[1], stk->xyz[2]);
+}
+
+#ifdef INTERRUPT_MODE
+/**
+ * @brief:
+ */
+static void stk_reset_latched_int(struct stk8baxx_data *stk)
+{
+    u8 data = 0;
+
+    if (stk8baxx_reg_read(stk, STK8BAXX_REG_INTCFG2, 0, &data))
+        return;
+
+    if (stk8baxx_reg_write(stk, STK8BAXX_REG_INTCFG2, (data | STK8BAXX_INTCFG2_INT_RST)))
+        return;
+}
+
+/**
+ * @brief: Queue work list.
+ *              ???????
+ *          5. Enable IRQ.
+ *
+ * @param[in] work: struct work_struct *
+ */
+static void stk_data_irq_work(struct work_struct *work)
+{
+    struct stk8baxx_data *stk =
+        container_of(work, struct stk8baxx_data, alldata_work);
+    bool enable = true;
+    u8 data = 0;
+
+    if (!atomic_read(&stk->enabled))
+    {
+        stk_set_enable(stk, 1);
+        enable = false;
+    }
+
+    stk_read_accel_data(stk);
+    stk_report_accel_data(stk);
+
+    /* SIGMOTION */
+    if (!stk8baxx_reg_read(stk, STK8BAXX_REG_INTSTS1, 0, &data))
+    {
+        if (STK8BAXX_INTSTS1_SIG_MOT_STS & data)
+        {
+            STK_ACC_LOG("Get trigger for sig motion");
+        }
+    }
+
+    stk_reset_latched_int(stk);
+
+    if (!enable)
+        stk_set_enable(stk, 0);
+
+    enable_irq(stk->irq1);
+}
+
+/**
+ * @brief: IRQ handler. This function will be trigger after receiving IRQ.
+ *          1. Disable IRQ without waiting.
+ *          2. Send work to quque.
+ *
+ * @param[in] irq: irq number
+ * @param[in] data: void *
+ *
+ * @return: IRQ_HANDLED
+ */
+static irqreturn_t stk_all_data_handler(int irq, void *data)
+{
+    struct stk8baxx_data *stk = data;
+    disable_irq_nosync(irq);
+    queue_work(stk->alldata_workqueue, &stk->alldata_work);
+    return IRQ_HANDLED;
+}
+
+/**
+ * @brief:
+ */
+static int stk_interrupt_mode_setup(struct stk8baxx_data *stk)
+{
+    int error = 0;
+    struct device_node *stk_node;
+    u32 ints[2] = {0, 0};
+    stk->alldata_workqueue = create_singlethread_workqueue("stk_int1_wq");
+
+    if (stk->alldata_workqueue)
+        INIT_WORK(&stk->alldata_work, stk_data_irq_work);
+    else
+    {
+        STK_ACC_ERR("create_singlethread_workqueue error");
+        error = -EPERM;
+        goto exit_err;
+    }
+
+    stk_node = of_find_compatible_node(NULL, NULL, "mediatek, ACCEL-eint");
+
+    if (stk_node)
+    {
+        of_property_read_u32_array(stk_node, "interrupts", ints, ARRAY_SIZE(ints));
+        stk->interrupt_int1_pin = ints[0];
+        gpio_direction_input(stk->interrupt_int1_pin);
+        error = gpio_to_irq(stk->interrupt_int1_pin);
+
+        if (0 > error)
+        {
+            STK_ACC_ERR("gpio_to_irq failed");
+            error = -EINVAL;
+            goto exit_gpio_request_1;
+        }
+
+        stk->irq1 = error;
+        STK_ACC_LOG("irq #=%d, interrupt pin=%d", stk->irq1, stk->interrupt_int1_pin);
+        error = request_any_context_irq(stk->irq1, stk_all_data_handler,
+                                        IRQF_TRIGGER_RISING, STK8BAXX_IRQ_INT1_NAME, stk);
+
+        if (0 > error)
+        {
+            STK_ACC_ERR("request_any_context_irq(%d) failed for %d", stk->irq1, error);
+            goto exit_gpio_to_irq_1;
+        }
+    }
+    else
+    {
+        STK_ACC_ERR("Null device node of ACCEL-eint");
+        return -EINVAL;
+    }
+
+    return 0;
+exit_gpio_to_irq_1:
+    gpio_free(stk->interrupt_int1_pin);
+exit_gpio_request_1:
+    cancel_work_sync(&stk->alldata_work);
+    destroy_workqueue(stk->alldata_workqueue);
+exit_err:
+    return error;
+}
+
+/**
+ * @brief:
+ */
+static void stk_interrupt_mode_exit(struct stk8baxx_data *stk)
+{
+    free_irq(stk->irq1, stk);
+    gpio_free(stk->interrupt_int1_pin);
+    cancel_work_sync(&stk->alldata_work);
+    destroy_workqueue(stk->alldata_workqueue);
+}
+#else /* no INTERRUPT_MODE */
+/**
+ * @brief: Queue delayed_work list.
+ *          1. ??????.
+ *          2. Enable IRQ.
+ *
+ * @param[in] work: struct work_struct *
+ */
+ /*
+static void stk_sig_irq_delay_work(struct work_struct *work)
+{
+    struct stk8baxx_data *stk =
+        container_of(work, struct stk8baxx_data, sig_delaywork.work);
+    u8 data = 0;
+
+    if (!stk8baxx_reg_read(stk, STK8BAXX_REG_INTSTS1, 0, &data))
+    {
+        if (STK8BAXX_INTSTS1_SIG_MOT_STS & data)
+        {
+            STK_ACC_LOG("Get trigger for sig motion");
+        }
+    }
+
+    enable_irq(stk->irq1);
+}
+*/
+/**
+ * @brief: IRQ handler. This function will be trigger after receiving IRQ.
+ *          1. Disable IRQ without waiting.
+ *          2. Send delayed_work to quque.
+ *
+ * @param[in] irq: irq number
+ * @param[in] data: void *
+ *
+ * @return: IRQ_HANDLED
+ */
+static irqreturn_t stk_sig_handler(int irq, void *data)
+{
+    struct stk8baxx_data *stk = data;
+    disable_irq_nosync(irq);
+    schedule_delayed_work(&stk->sig_delaywork, 0);
+    return IRQ_HANDLED;
+}
+
+/**
+ * @brief: Queue delayed_work list.
+ *              ???????
+ *
+ * @param[in] work: struct work_struct *
+ */
+static void stk_accel_delay_work(struct work_struct *work)
+{
+    struct stk8baxx_data *stk =
+        container_of(work, struct stk8baxx_data, accel_delaywork.work);
+    bool enable = true;
+
+    if (!atomic_read(&stk->enabled))
+    {
+        stk_set_enable(stk, 1);
+        enable = false;
+    }
+
+    stk_read_accel_data(stk);
+    stk_report_accel_data(stk);
+
+    if (!enable)
+        stk_set_enable(stk, 0);
+}
+
+/**
+ * @brief: This function will send delayed_work to queue.
+ *          This function will be called regularly with period:
+ *          stk8baxx_data.poll_delay.
+ *
+ * @param[in] timer: struct hrtimer *
+ *
+ * @return: HRTIMER_RESTART.
+ */
+static enum hrtimer_restart stk_accel_timer_func(struct hrtimer *timer)
+{
+    struct stk8baxx_data *stk =
+        container_of(timer, struct stk8baxx_data, accel_timer);
+    schedule_delayed_work(&stk->accel_delaywork, 0);
+    hrtimer_forward_now(&stk->accel_timer, stk->poll_delay);
+    return HRTIMER_RESTART;
+}
+
+static int stk_polling_mode_setup(struct stk8baxx_data *stk)
+{
+    int error = 0;
+    struct device_node *stk_node;
+    u32 ints[2] = {0, 0};
+    //INIT_DELAYED_WORK(&stk->sig_delaywork, stk_sig_irq_delay_work);
+    stk_node = of_find_compatible_node(NULL, NULL, "mediatek, ACCEL-eint");
+#if 1
+    if (stk_node)
+    {
+        of_property_read_u32_array(stk_node, "interrupts", ints, ARRAY_SIZE(ints));
+        /* SIGMOTION */
+        stk->interrupt_int1_pin = ints[0];
+        gpio_direction_input(stk->interrupt_int1_pin);
+        error = gpio_to_irq(stk->interrupt_int1_pin);
+
+        if (0 > error)
+        {
+            STK_ACC_ERR("gpio_to_irq failed");
+            error = -EINVAL;
+            goto exit_gpio_request_1;
+        }
+
+        stk->irq1 = error;
+        STK_ACC_LOG("irq #=%d, interrupt pin=%d", stk->irq1, stk->interrupt_int1_pin);
+        error = request_any_context_irq(stk->irq1, stk_sig_handler,
+                                        IRQF_TRIGGER_RISING, STK8BAXX_IRQ_INT1_NAME, stk);
+
+        if (0 > error)
+        {
+            STK_ACC_ERR("request_any_context_irq(%d) failed for %d", stk->irq1, error);
+            goto exit_gpio_to_irq_1;
+        }
+    }
+    else
+    {
+        STK_ACC_ERR("Null device node of ACCEL-eint xxxx");
+		
+		//cancel_delayed_work_sync(&stk->sig_delaywork);
+        //return -EINVAL;
+        //goto exit_gpio_request_1;
+    }
+#endif
+
+    /* polling accel data */
+    INIT_DELAYED_WORK(&stk->accel_delaywork, stk_accel_delay_work);
+    hrtimer_init(&stk->accel_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+    stk->poll_delay = ns_to_ktime(
+                          STK8BAXX_SAMPLE_TIME[STK8BAXX_BWSEL_INIT_ODR - STK8BAXX_SPTIME_BASE]
+                          * NSEC_PER_USEC);
+    stk->accel_timer.function = stk_accel_timer_func;
+	STK_ACC_ERR("polling mode success");
+    return 0;
+#if 1	
+    free_irq(stk->irq1, stk);
+exit_gpio_to_irq_1:
+    gpio_free(stk->interrupt_int1_pin);
+exit_gpio_request_1:
+    cancel_delayed_work_sync(&stk->sig_delaywork);
+    return error;
+#endif 
+}
+
+/**
+ * @brief:
+ */
+static void stk_polling_mode_exit(struct stk8baxx_data *stk)
+{
+    hrtimer_try_to_cancel(&stk->accel_timer);
+    cancel_delayed_work_sync(&stk->accel_delaywork);
+    free_irq(stk->irq1, stk);
+    gpio_free(stk->interrupt_int1_pin);
+    cancel_delayed_work_sync(&stk->sig_delaywork);
+}
+#endif /* INTERRUPT_MODE */
+
+/**
+ * @brief: stk8baxx register initialize
+ *
+ * @param[in/out] stk: struct stk8baxx_data *
+ *
+ * @return: Success or fail.
+ *          0: Success
+ *          others: Fail
+ */
+static int stk_reg_init(struct stk8baxx_data *stk)
+{
+    int error = 0;
+	STK_ACC_LOG("reg init...");
+    /* SW reset */
+    error = stk_sw_reset(stk);
+
+    if (error)
+        return error;
+
+    ///* SUSPEND */
+    //stk_set_enable(stk, 0);
+    /* ID46: Low-power -> Suspend -> Normal */
+    error = stk_change_power_mode(stk, STK8BAXX_PWMD_SUSPEND);
+
+    if (error)
+        return error;
+
+    error = stk_change_power_mode(stk, STK8BAXX_PWMD_NORMAL);
+
+    if (error)
+        return error;
+
+    atomic_set(&stk->enabled, 1);
+    /* INT1, push-pull, active high. */
+    error = stk8baxx_reg_write(stk, STK8BAXX_REG_INTCFG1,
+                              STK8BAXX_INTCFG1_INT1_ACTIVE_H | STK8BAXX_INTCFG1_INT1_OD_PUSHPULL);
+
+    if (error)
+        return error;
+
+#ifdef INTERRUPT_MODE
+    /* map sig motion interrupt to int1 */
+    error = stk8baxx_reg_write(stk, STK8BAXX_REG_INTMAP1, STK8BAXX_INTMAP1_SIGMOT2INT1);
+
+    if (error)
+        return error;
+
+    /* map new accel data interrupt to int1 */
+    error = stk8baxx_reg_write(stk, STK8BAXX_REG_INTMAP2, STK8BAXX_INTMAP2_DATA2INT1);
+
+    if (error)
+        return error;
+
+    /* enable new data interrupt for new accel data */
+    error = stk8baxx_reg_write(stk, STK8BAXX_REG_INTEN2, STK8BAXX_INTEN2_DATA_EN);
+
+    if (error)
+        return error;
+
+    /*
+     * latch int
+     * In interrupt mode + significant mode, both of them share the same INT.
+     * Set latched to make sure we can get SIG data(SIG_MOT_STS) before signal fall down.
+     * Read SIG flow:
+     * Get INT --> check INTSTS1.SIG_MOT_STS status -> INTCFG2.INT_RST(relese all latched INT)
+     * In latch mode, echo interrupt(SIT_MOT_STS) will cause all INT(INT1)
+     * rising up.
+     */
+    error = stk8baxx_reg_write(stk, STK8BAXX_REG_INTCFG2, STK8BAXX_INTCFG2_LATCHED);
+
+    if (error)
+        return error;
+
+#else /* no INTERRUPT_MODE */
+    /* map sig motion interrupt to int1 */
+    error = stk8baxx_reg_write(stk, STK8BAXX_REG_INTMAP1, STK8BAXX_INTMAP1_SIGMOT2INT1);
+
+    if (error)
+        return error;
+
+    error = stk8baxx_reg_write(stk, STK8BAXX_REG_INTMAP2, 0);
+
+    if (error)
+        return error;
+
+    /* disable new data interrupt */
+    error = stk8baxx_reg_write(stk, STK8BAXX_REG_INTEN2, 0);
+
+    if (error)
+        return error;
+
+    /* non-latch int */
+    error = stk8baxx_reg_write(stk, STK8BAXX_REG_INTCFG2, STK8BAXX_INTCFG2_NOLATCHED);
+
+    if (error)
+        return error;
+
+#endif /* INTERRUPT_MODE */
+
+#ifdef STK_SIG_MOTION
+    /* enable new data interrupt for sig motion */
+    error = stk8baxx_reg_write(stk, STK8BAXX_REG_INTEN1, STK8BAXX_INTEN1_SLP_EN_XYZ);
+#else /* STK_SIG_MOTION */
+    /* disable new data interrupt for sig motion */
+    error = stk8baxx_reg_write(stk, STK8BAXX_REG_INTEN1, 0);
+#endif /* STK_SIG_MOTION */
+
+    if (error)
+        return error;
+
+    /* SLOPE DELAY */
+    error = stk8baxx_reg_write(stk, STK8BAXX_REG_SLOPEDLY, 0x00);
+
+    if (error)
+        return error;
+
+    /* SLOPE THRESHOLD */
+    error = stk8baxx_reg_write(stk, STK8BAXX_REG_SLOPETHD, STK8BAXX_SLOPETHD_DEF);
+
+    if (error)
+        return error;
+
+    /* SIGMOT1 */
+    error = stk8baxx_reg_write(stk, STK8BAXX_REG_SIGMOT1,
+                              STK8BAXX_SIGMOT1_SKIP_TIME_3SEC);
+
+    if (error)
+        return error;
+
+    /* SIGMOT2 */
+    error = stk8baxx_reg_write(stk, STK8BAXX_REG_SIGMOT2,
+                              STK8BAXX_SIGMOT2_SIG_MOT_EN);
+
+    if (error)
+        return error;
+
+    /* SIGMOT3 */
+    error = stk8baxx_reg_write(stk, STK8BAXX_REG_SIGMOT3,
+                              STK8BAXX_SIGMOT3_PROOF_TIME_1SEC);
+
+    if (error)
+        return error;
+
+    /* According to STK_DEF_DYNAMIC_RANGE */
+    error = stk_range_selection(stk, STK8BAXX_RANGESEL_DEF);
+
+    if (error)
+        return error;
+
+    /* ODR */
+    error = stk8baxx_reg_write(stk, STK8BAXX_REG_BWSEL, STK8BAXX_BWSEL_INIT_ODR);
+
+    if (error)
+        return error;
+
+    /* i2c watchdog enable */
+    error = stk8baxx_reg_write(stk, STK8BAXX_REG_INTFCFG,
+                              STK8BAXX_INTFCFG_I2C_WDT_EN);
+
+    if (error)
+        return error;
+
+    /* SUSPEND */
+    //stk_set_enable(stk, 0);
+    error = stk_change_power_mode(stk, STK8BAXX_PWMD_SUSPEND);
+
+    if (error)
+        return error;
+
+    atomic_set(&stk->enabled, 0);
+    return 0;
+}
+
+/**
+ * @brief
+ */
+static int stk_fops_open(struct inode *inode, struct file *file)
+{
+    file->private_data = stk_data->client;
+
+    if (NULL == file->private_data)
+    {
+        STK_ACC_ERR("Null point for i2c_client");
+        return -EINVAL;
+    }
+
+    return nonseekable_open(inode, file);
+}
+
+/**
+ * @brief
+ */
+static int stk_fops_release(struct inode *inode, struct file *file)
+{
+    file->private_data = NULL;
+    return 0;
+}
+
+/**
+ * @brief:
+ */
+static long stk_fops_unlocked_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+    struct i2c_client *client = (struct i2c_client *)file->private_data;
+    struct stk8baxx_data *stk = i2c_get_clientdata(client);
+    char strbuf[STK_BUFSIZE];
+    void __user *data;
+    int error = 0;
+    bool enable = true;
+    struct GSENSOR_VECTOR3D sensor_vector;
+    struct SENSOR_DATA sensor_data;
+    u8 xyz[3] = {0, 0, 0};
+
+    if (_IOC_DIR(cmd) & _IOC_READ)
+        error = !access_ok(VERIFY_WRITE, (void __user *)arg, _IOC_SIZE(cmd));
+    else if (_IOC_DIR(cmd) & _IOC_WRITE)
+        error = !access_ok(VERIFY_READ, (void __user *)arg, _IOC_SIZE(cmd));
+
+    if (error)
+    {
+        STK_ACC_ERR("access error: %08X, (%2d, %2d)", cmd, _IOC_DIR(cmd), _IOC_SIZE(cmd));
+        return -EFAULT;
+    }
+	STK_ACC_LOG("entry");
+    switch (cmd)
+    {
+        case GSENSOR_IOCTL_INIT:
+			STK_ACC_LOG("GSENSOR_IOCTL_INIT");
+            stk_reg_init(stk);
+            break;
+
+        case GSENSOR_IOCTL_READ_CHIPINFO:
+			STK_ACC_LOG("GSENSOR_IOCTL_READ_CHIPINFO");
+            data = (void __user *)arg;
+
+            if (NULL == data)
+            {
+                error = -EINVAL;
+                break;
+            }
+
+            sprintf(strbuf, "STK832x Chip");
+
+            if (copy_to_user(data, strbuf, strlen(strbuf) + 1))
+            {
+                error = -EFAULT;
+                break;
+            }
+
+            break;
+
+        case GSENSOR_IOCTL_READ_SENSORDATA:
+			STK_ACC_LOG("GSENSOR_IOCTL_READ_SENSORDATA");
+            data = (void __user *)arg;
+
+            if (NULL == data)
+            {
+                error = -EINVAL;
+                break;
+            }
+
+            if (!atomic_read(&stk->enabled))
+            {
+                stk_set_enable(stk, 1);
+                enable = false;
+            }
+
+            stk_read_accel_data(stk);
+
+            if (!enable)
+                stk_set_enable(stk, 0);
+
+            sprintf(strbuf, "%04x %04x %04x", stk->xyz[0], stk->xyz[1], stk->xyz[2]);
+
+            if (copy_to_user(data, strbuf, strlen(strbuf) + 1))
+            {
+                error = -EFAULT;
+                break;
+            }
+
+            break;
+
+        case GSENSOR_IOCTL_READ_OFFSET:
+			STK_ACC_LOG("GSENSOR_IOCTL_READ_OFFSET");
+            data = (void __user *)arg;
+
+            if (NULL == data)
+            {
+                error = -EINVAL;
+                break;
+            }
+
+            stk_get_offset(stk, xyz);
+            sensor_vector.x = (unsigned short)(xyz[0]);
+            sensor_vector.y = (unsigned short)(xyz[1]);
+            sensor_vector.z = (unsigned short)(xyz[2]);
+
+            if (copy_to_user(data, &sensor_vector, sizeof(sensor_vector)))
+            {
+                error = -EFAULT;
+                break;
+            }
+
+            break;
+
+        case GSENSOR_IOCTL_READ_GAIN:
+			STK_ACC_LOG("GSENSOR_IOCTL_READ_GAIN");
+            data = (void __user *)arg;
+
+            if (NULL == data)
+            {
+                error = -EINVAL;
+                break;
+            }
+
+            stk_get_sensitivity(stk);
+            sensor_vector.x = (unsigned short)(stk->sensitivity);
+            sensor_vector.y = (unsigned short)(stk->sensitivity);
+            sensor_vector.z = (unsigned short)(stk->sensitivity);
+
+            if (copy_to_user(data, &sensor_vector, sizeof(sensor_vector)))
+            {
+                error = -EFAULT;
+                break;
+            }
+
+            break;
+
+        case GSENSOR_IOCTL_READ_RAW_DATA:
+			STK_ACC_LOG("GSENSOR_IOCTL_READ_RAW_DATA");
+            data = (void __user *)arg;
+
+            if (NULL == data)
+            {
+                error = -EINVAL;
+                break;
+            }
+
+            if (!atomic_read(&stk->enabled))
+            {
+                stk_set_enable(stk, 1);
+                enable = false;
+            }
+
+            stk_read_accel_rawdata(stk);
+
+            if (!enable)
+                stk_set_enable(stk, 0);
+
+            sprintf(strbuf, "%04x %04x %04x", stk->xyz[0], stk->xyz[1], stk->xyz[2]);
+
+            if (copy_to_user(data, strbuf, strlen(strbuf) + 1))
+            {
+                error = -EFAULT;
+                break;
+            }
+
+            break;
+
+        case GSENSOR_IOCTL_SET_CALI:
+			STK_ACC_LOG("GSENSOR_IOCTL_SET_CALI");
+            data = (void __user *)arg;
+
+            if (NULL == data)
+            {
+                error = -EINVAL;
+                break;
+            }
+
+            if (copy_from_user(&sensor_data, data, sizeof(sensor_data)))
+            {
+                error = -EFAULT;
+                break;
+            }
+
+            xyz[0] = (u8)(sensor_data.x * stk->sensitivity / GRAVITY_EARTH_1000);
+            xyz[1] = (u8)(sensor_data.y * stk->sensitivity / GRAVITY_EARTH_1000);
+            xyz[2] = (u8)(sensor_data.z * stk->sensitivity / GRAVITY_EARTH_1000);
+            /* write cali to file */
+            error = stk_write_cali_to_file(stk, xyz, STK_K_SUCCESS_FILE);
+
+            if (error)
+            {
+                STK_ACC_ERR("failed to stk_write_cali_to_file, error=%d", error);
+                error = -EFAULT;
+                break;
+            }
+            atomic_set(&stk->cali_status, STK_K_SUCCESS_FILE);
+
+            break;
+
+        case GSENSOR_IOCTL_GET_CALI:
+			STK_ACC_LOG("GSENSOR_IOCTL_GET_CALI");
+            data = (void __user *)arg;
+
+            if (NULL == data)
+            {
+                error = -EINVAL;
+                break;
+            }
+
+            stk_get_cali(stk, xyz);
+            sensor_data.x = (unsigned short)(xyz[0] * GRAVITY_EARTH_1000 / stk->sensitivity);
+            sensor_data.y = (unsigned short)(xyz[1] * GRAVITY_EARTH_1000 / stk->sensitivity);
+            sensor_data.z = (unsigned short)(xyz[2] * GRAVITY_EARTH_1000 / stk->sensitivity);
+
+            if (copy_to_user(data, &sensor_data, sizeof(sensor_data)))
+            {
+                error = -EFAULT;
+                break;
+            }
+
+            break;
+
+        case GSENSOR_IOCTL_CLR_CALI:
+			STK_ACC_LOG("GSENSOR_IOCTL_CLR_CALI");
+            /* write cali to file */
+            error = stk_write_cali_to_file(stk, xyz, STK_K_SUCCESS_FILE);
+
+            if (error)
+            {
+                STK_ACC_ERR("failed to stk_write_cali_to_file, error=%d", error);
+                error = -EFAULT;
+                break;
+            }
+
+            break;
+
+        default:
+            STK_ACC_ERR("unknown IOCTL: 0x%08X", cmd);
+            error = -ENOIOCTLCMD;
+            break;
+    }
+
+    return error;
+}
+
+#ifdef CONFIG_COMPAT
+/**
+ * @brief:
+ */
+static long stk_fops_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+    struct i2c_client *client = (struct i2c_client *)file->private_data;
+    struct stk8baxx_data *stk = i2c_get_clientdata(client);
+    long error = 0;
+    void __user *arg32 = compat_ptr(arg);
+
+    if (!file->f_op || !file->f_op->unlocked_ioctl)
+        return -ENOTTY;
+	STK_ACC_LOG("entry");
+    switch (cmd)
+    {
+        case COMPAT_GSENSOR_IOCTL_INIT:
+			STK_ACC_LOG("COMPAT_GSENSOR_IOCTL_INIT");
+            stk_reg_init(stk);
+            break;
+
+        case COMPAT_GSENSOR_IOCTL_READ_CHIPINFO:
+			STK_ACC_LOG("COMPAT_GSENSOR_IOCTL_READ_CHIPINFO");
+            if (NULL == arg32)
+            {
+                error = -EINVAL;
+                break;
+            }
+
+            error = file->f_op->unlocked_ioctl(file, GSENSOR_IOCTL_READ_CHIPINFO, (unsigned long)arg32);
+
+            if (error)
+            {
+                STK_ACC_ERR("GSENSOR_IOCTL_READ_CHIPINFO failed.");
+                return error;
+            }
+
+            break;
+
+        case COMPAT_GSENSOR_IOCTL_READ_SENSORDATA:
+			STK_ACC_LOG("COMPAT_GSENSOR_IOCTL_READ_SENSORDATA");
+            if (NULL == arg32)
+            {
+                error = -EINVAL;
+                break;
+            }
+
+            error = file->f_op->unlocked_ioctl(file, GSENSOR_IOCTL_READ_SENSORDATA, (unsigned long)arg32);
+
+            if (error)
+            {
+                STK_ACC_ERR("GSENSOR_IOCTL_READ_SENSORDATA failed.");
+                return error;
+            }
+
+            break;
+
+        case COMPAT_GSENSOR_IOCTL_READ_OFFSET:
+			STK_ACC_LOG("COMPAT_GSENSOR_IOCTL_READ_OFFSET");
+            if (NULL == arg32)
+            {
+                error = -EINVAL;
+                break;
+            }
+
+            error = file->f_op->unlocked_ioctl(file, GSENSOR_IOCTL_READ_OFFSET, (unsigned long)arg32);
+
+            if (error)
+            {
+                STK_ACC_ERR("GSENSOR_IOCTL_READ_OFFSET failed.");
+                return error;
+            }
+
+            break;
+
+        case COMPAT_GSENSOR_IOCTL_READ_GAIN:
+			STK_ACC_LOG("COMPAT_GSENSOR_IOCTL_READ_GAIN");
+            if (NULL == arg32)
+            {
+                error = -EINVAL;
+                break;
+            }
+
+            error = file->f_op->unlocked_ioctl(file, GSENSOR_IOCTL_READ_GAIN, (unsigned long)arg32);
+
+            if (error)
+            {
+                STK_ACC_ERR("GSENSOR_IOCTL_READ_GAIN failed.");
+                return error;
+            }
+
+            break;
+
+        case COMPAT_GSENSOR_IOCTL_READ_RAW_DATA:
+			STK_ACC_LOG("COMPAT_GSENSOR_IOCTL_READ_RAW_DATA");
+            if (NULL == arg32)
+            {
+                error = -EINVAL;
+                break;
+            }
+
+            error = file->f_op->unlocked_ioctl(file, GSENSOR_IOCTL_READ_RAW_DATA, (unsigned long)arg32);
+
+            if (error)
+            {
+                STK_ACC_ERR("GSENSOR_IOCTL_READ_RAW_DATA failed.");
+                return error;
+            }
+
+            break;
+
+        case COMPAT_GSENSOR_IOCTL_SET_CALI:
+			STK_ACC_LOG("COMPAT_GSENSOR_IOCTL_SET_CALI");
+            if (NULL == arg32)
+            {
+                error = -EINVAL;
+                break;
+            }
+
+            error = file->f_op->unlocked_ioctl(file, GSENSOR_IOCTL_SET_CALI, (unsigned long)arg32);
+
+            if (error)
+            {
+                STK_ACC_ERR("GSENSOR_IOCTL_SET_CALI failed.");
+                return error;
+            }
+
+            break;
+
+        case COMPAT_GSENSOR_IOCTL_GET_CALI:
+			STK_ACC_LOG("COMPAT_GSENSOR_IOCTL_GET_CALI");
+            if (NULL == arg32)
+            {
+                error = -EINVAL;
+                break;
+            }
+
+            error = file->f_op->unlocked_ioctl(file, GSENSOR_IOCTL_GET_CALI, (unsigned long)arg32);
+
+            if (error)
+            {
+                STK_ACC_ERR("GSENSOR_IOCTL_GET_CALI failed.");
+                return error;
+            }
+
+            break;
+
+        case COMPAT_GSENSOR_IOCTL_CLR_CALI:
+			STK_ACC_LOG("COMPAT_GSENSOR_IOCTL_CLR_CALI");
+            if (NULL == arg32)
+            {
+                error = -EINVAL;
+                break;
+            }
+
+            error = file->f_op->unlocked_ioctl(file, GSENSOR_IOCTL_CLR_CALI, (unsigned long)arg32);
+
+            if (error)
+            {
+                STK_ACC_ERR("GSENSOR_IOCTL_CLR_CALI failed.");
+                return error;
+            }
+
+            break;
+
+        default:
+            STK_ACC_ERR("unknown IOCTL: 0x%08X", cmd);
+            error = -ENOIOCTLCMD;
+            break;
+    }
+
+    return error;
+}
+#endif
+
+static struct file_operations stk_miscdevice_fops =
+{
+    .owner = THIS_MODULE,
+    .open = stk_fops_open,
+    .release = stk_fops_release,
+    .unlocked_ioctl = stk_fops_unlocked_ioctl,
+#ifdef CONFIG_COMPAT
+    .compat_ioctl = stk_fops_compat_ioctl,
+#endif
+};
+
+static struct miscdevice stk_miscdevice =
+{
+    .minor = MISC_DYNAMIC_MINOR,
+    .name = "gsensor",
+    .fops = &stk_miscdevice_fops,
+};
+
+/**
+ * @brief: Open data rerport to HAL.
+ *      refer: drivers/misc/mediatek/accelerometer/inc/accel.h
+ */
 static int gsensor_open_report_data(int open)
 {
-	/* should queuq work to report event if  is_report_input_direct=true */
-	return 0;
+    /* TODO. should queuq work to report event if  is_report_input_direct=true */
+    return 0;
 }
 
-/*----------------------------------------------------------------------------*/
-/* if use  this typ of enable , Gsensor only enabled but not report inputEvent to HAL */
-#ifndef CONFIG_CUSTOM_KERNEL_SENSORHUB
-static int gsensor_enable_nodata(int en)
+#ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB
+/**
+ * @brief:
+ */
+static int stk_scp_setPowerMode(int enable)
 {
-	int err = 0;
+    static bool gsensor_scp_en_status;
+    static unsigned int gsensor_scp_en_map;
+    int error;
+    SCP_SENSOR_HUB_DATA stk_scp_sensor_hub_data;
+    int len;
 
-#ifdef GSENSOR_UT
-	GSE_FUN();
-#endif
+    if (en)
+        gsensor_scp_en_map |= (1 << ID_ACCELEROMETER);
+    else
+        gsensor_scp_en_map &= ~(1 << ID_ACCELEROMETER);
 
-	mutex_lock(&gsensor_mutex);
-	if (((en == 0) && (sensor_power == false)) || ((en == 1) && (sensor_power == true))) {
-		enable_status = sensor_power;
-		GSE_LOG("Gsensor device have updated!\n");
-	} else {
-		enable_status = !sensor_power;
-		if (atomic_read(&obj_i2c_data->suspend) == 0) {
-			err = STK8BAXX_SetPowerMode(obj_i2c_data->client, enable_status);
-			GSE_LOG
-			    ("Gsensor not in suspend gsensor_SetPowerMode!, enable_status = %d\n",
-			     enable_status);
-		} else {
-			GSE_LOG
-			    ("Gsensor in suspend and can not enable or disable!enable_status = %d\n",
-			     enable_status);
-		}
-	}
-	mutex_unlock(&gsensor_mutex);
+    if (0 == gsensor_scp_en_map)
+        enable = 0;
+    else
+        enable = 1;
 
-	if (err != STK8BAXX_SUCCESS) {
-		GSE_ERR("%s: fail!\n", __func__);
-		return -1;
-	}
+    if (gsensor_scp_en_status != enable)
+    {
+        gsensor_scp_en_status = enable;
+        stk_scp_sensor_hub_data.activate_req.sensorType = ID_ACCELEROMETER;
+        stk_scp_sensor_hub_data.activate_req.action = SENSOR_HUB_ACTIVATE;
+        stk_scp_sensor_hub_data.activate_req.enable = enable;
+        len = sizeof(stk_scp_sensor_hub.activate_req);
+        error = SCP_sensorHub_req_send(&stk_scp_sensor_hub_data, &len, 1);
 
-	GSE_LOG("%s: OK!!!\n", __func__);
-	return 0;
+        if (error)
+        {
+            STK_ACC_ERR("SCP_sensorHub_req_send fail");
+            return error;
+        }
+    }
+
+    return 0;
 }
-#else
+
+/**
+ * @brief: Only enable not report event to HAL.
+ *      refer: drivers/misc/mediatek/accelerometer/inc/accel.h
+ */
 static int scp_gsensor_enable_nodata(int en)
 {
-	int err = 0;
+    struct stk8baxx_data *stk = stk_data;
+    int error = 0;
 
-	mutex_lock(&gsensor_mutex);
-	if (((en == 0) && (scp_sensor_power == false)) || ((en == 1) && (scp_sensor_power == true))) {
-		enable_status = scp_sensor_power;
-		GSE_LOG("Gsensor device have updated!\n");
-	} else {
-		enable_status = !scp_sensor_power;
-		if (atomic_read(&obj_i2c_data->suspend) == 0) {
-			err = STK8BAXX_SCP_SetPowerMode(enable_status, ID_ACCELEROMETER);
-			if (0 == err)
-				scp_sensor_power = enable_status;
-			GSE_LOG
-			    ("Gsensor not in suspend gsensor_SetPowerMode!, enable_status = %d\n",
-			     enable_status);
-		} else {
-			GSE_LOG
-			    ("Gsensor in suspend and can not enable or disable!enable_status = %d\n",
-			     enable_status);
-		}
-	}
-	mutex_unlock(&gsensor_mutex);
+    if (en == atomic_read(&stk->enabled))
+        STK_ACC_LOG("Gsensor device have updated!");
+    else
+    {
+        error = stk_scp_setPowerMode(en);
 
-	if (err != STK8BAXX_SUCCESS) {
-		GSE_LOG("scp_sensor_enable_nodata fail!\n");
-		return -1;
-	}
+        if (error)
+        {
+            STK_ACC_ERR("failed");
+            return -1;
+        }
 
-	GSE_LOG("%s OK!!!\n", __func__);
-	return 0;
+        atomic_set(&stk->enabled_for_acc, en ? 1 : 0);
+        STK_ACC_LOG("enabled_for_acc is %d", stk->enabled_for_acc);
+    }
+
+    return 0;
 }
-#endif
-/*----------------------------------------------------------------------------*/
-static int gsensor_set_delay(u64 ns)
+#else /* CONFIG_CUSTOM_KERNEL_SENSORHUB */
+/**
+ * @brief: Only enable not report event to HAL.
+ *      refer: drivers/misc/mediatek/accelerometer/inc/accel.h
+ */
+static int gsensor_enable_nodata(int en)
 {
-	int err = 0;
-	int value;
-#ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB
-	SCP_SENSOR_HUB_DATA req;
-	int len;
-#endif				/* #ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB */
+    struct stk8baxx_data *stk = stk_data;
 
-#ifdef GSENSOR_UT
-	GSE_FUN();
-#endif
+    if (en)
+    {
+        stk_set_enable(stk, 1);
+        atomic_set(&stk->enabled_for_acc, 1);
+    }
+    else
+    {
+        stk_set_enable(stk, 0);
+        atomic_set(&stk->enabled_for_acc, 0);
+    }
 
-	value = (int)ns / 1000 / 1000;
+    STK_ACC_LOG("enabled_for_acc is %d", en);
+    return 0;
+}
+#endif /* CONFIG_CUSTOM_KERNEL_SENSORHUB */
 
-#ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB
-	req.set_delay_req.sensorType = ID_ACCELEROMETER;
-	req.set_delay_req.action = SENSOR_HUB_SET_DELAY;
-	req.set_delay_req.delay = value;
-	len = sizeof(req.activate_req);
-	err = SCP_sensorHub_req_send(&req, &len, 1);
-	if (err) {
-		GSE_ERR("SCP_sensorHub_req_send!\n");
-		return err;
-	}
-#else				/* #ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB */
-
-
-	mutex_lock(&gsensor_mutex);
-	STK8BAXX_SetDelay(obj_i2c_data->client, (uint32_t) ns);
-	mutex_unlock(&gsensor_mutex);
-	if (err != STK8BAXX_SUCCESS) {
-		GSE_ERR("Set delay parameter error!\n");
-		return -1;
-	}
-#if defined(CONFIG_STK8BAXX_LOWPASS)
-	obj_i2c_data->fir.num = 0;
-	obj_i2c_data->fir.idx = 0;
-	obj_i2c_data->fir.sum[STK8BAXX_AXIS_X] = 0;
-	obj_i2c_data->fir.sum[STK8BAXX_AXIS_Y] = 0;
-	obj_i2c_data->fir.sum[STK8BAXX_AXIS_Z] = 0;
-	atomic_set(&obj_i2c_data->filter, 1);
-#endif
-
-#endif				/* #ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB */
-	GSE_LOG("%s: (%d)\n", __func__, value);
-	return 0;
+/**
+ * @brief:
+ */
+static int gsensor_batch(int flag, int64_t samplingPeriodNs, int64_t maxBatchReportLatencyNs)
+{
+    return 0;
 }
 
-/*----------------------------------------------------------------------------*/
+/**
+ * @brief:
+ */
+static int gsensor_flush(void)
+{
+    return -1; /* error */
+}
+
+/**
+ * @brief:
+ */
+static int gsensor_set_delay(u64 delay_ns)
+{
+#ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB
+    int error;
+    SCP_SENSOR_HUB_DATA stk_scp_sensor_hub_data;
+    int len;
+#endif /* CONFIG_CUSTOM_KERNEL_SENSORHUB */
+    struct stk8baxx_data *stk = stk_data;
+	int int32_delay_ns = 0;
+
+    //STK_ACC_LOG("delay= %d ms", (int)(delay_ns / 1000));
+	int32_delay_ns = (int)(delay_ns>>10);
+    //STK_ACC_LOG("delay= %d ms", (int)(delay_ns / 1000));
+    STK_ACC_LOG("delay= %d ms, %lld", int32_delay_ns, delay_ns);	
+#ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB
+    stk_scp_sensor_hub_data.set_delay_req.sensorType = ID_ACCELEROMETER;
+    stk_scp_sensor_hub_data.set_delay_req.action = SENSOR_HUB_SET_DELAY;
+    stk_scp_sensor_hub_data.set_delay_req.delay = (int) (delay_ns / 1000000);
+    len = sizeof(stk_scp_sensor_hub.set_delay_req);
+    error = SCP_sensorHub_req_send(&stk_scp_sensor_hub, &len, 1);
+
+    if (error)
+    {
+        STK_ACC_ERR("SCP_sensorHub_req_send fail");
+        return error;
+    }
+
+#endif /* CONFIG_CUSTOM_KERNEL_SENSORHUB */
+    //stk_set_delay(stk, (int)(delay_ns / 1000));
+    stk_set_delay(stk, int32_delay_ns);
+    return 0;
+}
+
+/**
+ * @brief:
+ */
 static int gsensor_get_data(int *x, int *y, int *z, int *status)
 {
-	int err = 0;
 #ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB
-	SCP_SENSOR_HUB_DATA req;
-	int len;
-#else
-	char buff[STK8BAXX_BUFSIZE];
-#endif				/* #ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB */
+    int error;
+    SCP_SENSOR_HUB_DATA stk_scp_sensor_hub_data;
+    int len;
+    stk_scp_sensor_hub_data.get_data_req.sensorType = ID_ACCELEROMETER;
+    stk_scp_sensor_hub_data.get_data_req.action = SENSOR_HUB_GET_DATA;
+    len = sizeof(stk_scp_sensor_hub.get_data_req);
+    error = SCP_sensorHub_req_send(&stk_scp_sensor_hub, &len, 1);
 
-	/* GSE_FUN(); */
+    if (error)
+    {
+        STK_ACC_ERR("SCP_sensorHub_req_send fail");
+        return error;
+    }
 
-#ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB
-	req.get_data_req.sensorType = ID_ACCELEROMETER;
-	req.get_data_req.action = SENSOR_HUB_GET_DATA;
-	len = sizeof(req.get_data_req);
-	err = SCP_sensorHub_req_send(&req, &len, 1);
-	if (err) {
-		GSE_ERR("SCP_sensorHub_req_send!\n");
+    if (ID_ACCELEROMETER != stk_scp_sensor_hub_data.get_data_rsp.sensorType
+        || SENSOR_HUB_GET_DATA != stk_scp_sensor_hub_data.get_data_rsp.action
+        || 0 != stk_scp_sensor_hub_data.get_data_rsp.errCode)
+    {
+        STK_ACC_ERR("error : %d\n", stk_scp_sensor_hub_data.get_data_rsp.errCode);
+        return stk_scp_sensor_hub_data.get_data_rsp.errCode;
+    }
+
+    *x = (int)stk_scp_sensor_hub_data.get_data_rsp.int16_Data[0] * GRAVITY_EARTH_1000 / 1000;
+    *y = (int)stk_scp_sensor_hub_data.get_data_rsp.int16_Data[1] * GRAVITY_EARTH_1000 / 1000;
+    *z = (int)stk_scp_sensor_hub_data.get_data_rsp.int16_Data[2] * GRAVITY_EARTH_1000 / 1000;
+    STK_ACC_LOG("x = %d, y = %d, z = %d\n", *x, *y, *z);
+#else /* CONFIG_CUSTOM_KERNEL_SENSORHUB */
+    struct stk8baxx_data *stk = stk_data;
+    char buff[256];
+    int error;
+	int accelData[STK_AXES_NUM] = { 0 };
+    stk_read_accel_data(stk);
+	STK_ACC_LOG("raw data:x:%d, y:%d, z:%d\n", stk->xyz[0], stk->xyz[1], stk->xyz[2]);	
+	STK_ACC_LOG(" info map[%d][%d][%d] sign[%d][%d][%d]",stk->cvt.map[0],stk->cvt.map[1],stk->cvt.map[2],stk->cvt.sign[0],stk->cvt.sign[1],stk->cvt.sign[2]);
+	STK_ACC_LOG(" cali_sw[%d][%d][%d]",stk->cali_sw[0],stk->cali_sw[1],stk->cali_sw[2]);
+	stk->xyz[STK_AXIS_X] += stk->cvt.sign[STK_AXIS_X]*stk->cali_sw[stk->cvt.map[STK_AXIS_X]];
+	stk->xyz[STK_AXIS_Y] += stk->cvt.sign[STK_AXIS_Y]*stk->cali_sw[stk->cvt.map[STK_AXIS_Y]];
+	stk->xyz[STK_AXIS_Z] += stk->cvt.sign[STK_AXIS_Z]*stk->cali_sw[stk->cvt.map[STK_AXIS_Z]];
+	STK_ACC_LOG("cali done raw[%d][%d][%d]",stk->xyz[0],stk->xyz[1],stk->xyz[2]);
+	accelData[(stk->cvt.map[STK_AXIS_X])] = (stk->cvt.sign[STK_AXIS_X] * stk->xyz[STK_AXIS_X]);
+	accelData[(stk->cvt.map[STK_AXIS_Y])] = (stk->cvt.sign[STK_AXIS_Y] * stk->xyz[STK_AXIS_Y]);
+	accelData[(stk->cvt.map[STK_AXIS_Z])] = (stk->cvt.sign[STK_AXIS_Z] * stk->xyz[STK_AXIS_Z]);
+	STK_ACC_LOG("map data:x:%d, y:%d, z:%d\n", accelData[STK_AXIS_X], accelData[STK_AXIS_Y], accelData[STK_AXIS_Z]);	
+
+	if(STK8BA53_ID == stk->pid){
+		if(abs(stk->cali_sw[STK_AXIS_Z])> 1300){
+				accelData[stk->cvt.map[STK_AXIS_Z]] = accelData[stk->cvt.map[STK_AXIS_Z]] - 2048;
+				STK_ACC_LOG("z:%d", accelData[stk->cvt.map[STK_AXIS_Z]]);
+		}
+	}else{
+		if(abs(stk->cali_sw[STK_AXIS_Z])> 325){
+				accelData[stk->cvt.map[STK_AXIS_Z]] = accelData[stk->cvt.map[STK_AXIS_Z]] - 512;
+				STK_ACC_LOG("z:%d", accelData[stk->cvt.map[STK_AXIS_Z]]);
+		}
+	}
+
+	accelData[STK_AXIS_X] = (accelData[STK_AXIS_X] * GRAVITY_EARTH_1000 / stk->sensitivity);
+	accelData[STK_AXIS_Y] = (accelData[STK_AXIS_Y] * GRAVITY_EARTH_1000 / stk->sensitivity);
+	accelData[STK_AXIS_Z] = (accelData[STK_AXIS_Z] * GRAVITY_EARTH_1000 / stk->sensitivity);
+	STK_ACC_LOG("accel data mg:x:%d, y:%d, z:%d, sen:%d\n", accelData[STK_AXIS_X], accelData[STK_AXIS_Y], accelData[STK_AXIS_Z], stk->sensitivity);	
+	sprintf(buff, "%04x %04x %04x", accelData[STK_AXIS_X], accelData[STK_AXIS_Y], accelData[STK_AXIS_Z]);
+    error = sscanf(buff, "%x %x %x", x, y, z);
+
+    if (3 != error)
+    {
+        STK_ACC_ERR("Invalid argument");
+        return -EINVAL;
+    }
+
+#endif /* CONFIG_CUSTOM_KERNEL_SENSORHUB */
+    *status = SENSOR_STATUS_ACCURACY_MEDIUM;
+    return 0;
+}
+
+static int stk_readCalibration(struct i2c_client *client, int *dat)
+{
+    struct stk8baxx_data *stk = stk_data;
+
+    STK_ACC_LOG("ori x:%d, y:%d, z:%d", stk->cali_sw[0], stk->cali_sw[1], stk->cali_sw[2]);
+
+	/*
+    dat[stk->cvt.map[STK_AXIS_X]] = stk->cvt.sign[STK_AXIS_X]*stk->cali_sw[STK_AXIS_X];
+    dat[stk->cvt.map[STK_AXIS_Y]] = stk->cvt.sign[STK_AXIS_Y]*stk->cali_sw[STK_AXIS_Y];
+    dat[stk->cvt.map[STK_AXIS_Z]] = stk->cvt.sign[STK_AXIS_Z]*stk->cali_sw[STK_AXIS_Z];                        
+	*/
+    dat[STK_AXIS_X] = stk->cali_sw[STK_AXIS_X];
+    dat[STK_AXIS_Y] = stk->cali_sw[STK_AXIS_Y];
+    dat[STK_AXIS_Z] = stk->cali_sw[STK_AXIS_Z];                        
+	
+	STK_ACC_LOG("not map x:%d, y:%d, z:%d", dat[0], dat[1], dat[2]);
+
+    return 0;
+}
+
+
+static int stk_writeCalibration(struct i2c_client *client, int dat[STK_AXES_NUM])
+{
+	struct stk8baxx_data *stk = stk_data;
+    int err = 0;
+    int cali[STK_AXES_NUM];
+
+    STK_ACC_LOG("entry");
+	
+
+	err = stk_readCalibration(client, cali);
+    if (0 != err) {	
+		STK_ACC_ERR("read offset fail, %d\n", err);
 		return err;
-	}
+    }
 
-	if (ID_ACCELEROMETER != req.get_data_rsp.sensorType ||
-	    SENSOR_HUB_GET_DATA != req.get_data_rsp.action || 0 != req.get_data_rsp.errCode) {
-		GSE_ERR("error : %d\n", req.get_data_rsp.errCode);
-		return req.get_data_rsp.errCode;
-	}
-	*x = (int)req.get_data_rsp.int16_Data[0] * GRAVITY_EARTH_1000 / 1000;
-	*y = (int)req.get_data_rsp.int16_Data[1] * GRAVITY_EARTH_1000 / 1000;
-	*z = (int)req.get_data_rsp.int16_Data[2] * GRAVITY_EARTH_1000 / 1000;
-	*status = SENSOR_STATUS_ACCURACY_MEDIUM;
+	STK_ACC_LOG("raw cali_sw[%d][%d][%d] dat[%d][%d][%d]",cali[0],cali[1],cali[2],dat[0],dat[1],dat[2]);
 
-	if (atomic_read(&obj_i2c_data->trace) & ADX_TRC_IOCTL)
-		GSE_LOG("x = %d, y = %d, z = %d\n", *x, *y, *z);
-#else				/* #ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB */
-	mutex_lock(&gsensor_mutex);
-	STK8BAXX_ReadSensorData(obj_i2c_data->client, buff, STK8BAXX_BUFSIZE);
-	mutex_unlock(&gsensor_mutex);
-	err = sscanf(buff, "%x %x %x", x, y, z);
-	*status = SENSOR_STATUS_ACCURACY_MEDIUM;
-#endif
+    cali[STK_AXIS_X] += dat[STK_AXIS_X];
+    cali[STK_AXIS_Y] += dat[STK_AXIS_Y];
+    cali[STK_AXIS_Z] += dat[STK_AXIS_Z];	
+	
+    stk->cali_sw[STK_AXIS_X] = cali[STK_AXIS_X];
+    stk->cali_sw[STK_AXIS_Y] = cali[STK_AXIS_Y];
+    stk->cali_sw[STK_AXIS_Z] = cali[STK_AXIS_Z];
 
-	return 0;
+	STK_ACC_LOG("new cali_sw[%d][%d][%d] ",stk->cali_sw[0],stk->cali_sw[1],stk->cali_sw[2]);
+    
+	mdelay(1);
+	
+    return err;
 }
 
-static int stk8baxx_batch(int flag, int64_t samplingPeriodNs, int64_t maxBatchReportLatencyNs)
+
+static int stk_factory_enable_sensor(bool enable, int64_t sample_ms)
 {
-	return 0;
+    int en = (true == enable ? 1 : 0);
+
+	STK_ACC_LOG("enable = %d", enable);
+    if (gsensor_enable_nodata(en))
+    {
+        STK_ACC_ERR("enable sensor failed");
+        return -1;
+    }
+
+    return 0;
 }
 
-static int stk8baxx_flush(void)
+static int stk_factory_get_data(int32_t data[3], int *status)
 {
-	return acc_flush_report();
+	STK_ACC_LOG("entry");
+    return gsensor_get_data(&data[0], &data[1], &data[2], status);
 }
 
-/*----------------------------------------------------------------------------*/
+static int stk_factory_get_raw_data(int32_t data[3])
+{
+    struct stk8baxx_data *stk = stk_data;
+	STK_ACC_LOG("entry");
+
+    stk_read_accel_rawdata(stk);
+    data[0] = (int32_t)stk->xyz[0];
+    data[1] = (int32_t)stk->xyz[1];
+    data[2] = (int32_t)stk->xyz[2];
+    return 0;
+}
+
+static int stk_factory_enable_cali(void)
+{
+    struct stk8baxx_data *stk = stk_data;
+
+	STK_ACC_LOG("entry");
+    stk_set_cali(stk);
+
+    return 0;
+}
+
+static int stk_factory_clear_cali(void)
+{
+    struct stk8baxx_data *stk = stk_data;
+	STK_ACC_LOG("entry");
+
+    stk_reset_cali(stk);
+
+    return 0;
+}
+
+static int stk_factory_set_cali(int32_t data[3])
+{
+    int error = 0;
+    struct stk8baxx_data *stk = stk_data;
+    int cali[3] = {0, 0, 0};
+
+	STK_ACC_LOG("ori x:%d, y:%d, z:%d", data[0], data[1], data[2]);
+
+    atomic_set(&stk->cali_status, STK_K_RUNNING);
+	
+	cali[STK_AXIS_X] = data[0] * stk->sensitivity / GRAVITY_EARTH_1000;
+	cali[STK_AXIS_Y] = data[1] * stk->sensitivity / GRAVITY_EARTH_1000;
+	cali[STK_AXIS_Z] = data[2] * stk->sensitivity / GRAVITY_EARTH_1000;	
+
+	STK_ACC_LOG("new x:%d, y:%d, z:%d", cali[0], cali[1], cali[2]);
+	
+    /* write cali to file */
+	/*
+	error = stk_write_cali_to_file(stk, xyz, STK_K_SUCCESS_FILE);
+
+    if (error)
+    {
+        STK_ACC_ERR("failed to stk_write_cali_to_file, error=%d", error);
+        return -1;
+    }
+	*/
+	
+	error = stk_writeCalibration(stk->client, cali);
+	if (error) {
+		STK_ACC_ERR("stk_writeCalibration failed!\n");
+		return -1;
+	}
+	
+    atomic_set(&stk->cali_status, STK_K_SUCCESS_FILE);
+
+    return 0;
+}
+
+static int stk_factory_get_cali(int32_t data[3])
+{
+    struct stk8baxx_data *stk = stk_data;
+    //u8 cali[3] = {0, 0, 0};
+
+	STK_ACC_LOG("entry");
+
+	data[0] = stk->cali_sw[STK_AXIS_X] *GRAVITY_EARTH_1000 / stk->sensitivity;
+	data[1] = stk->cali_sw[STK_AXIS_Y] *GRAVITY_EARTH_1000 / stk->sensitivity;
+	data[2] = stk->cali_sw[STK_AXIS_Z] *GRAVITY_EARTH_1000 / stk->sensitivity;
+	/*
+	if (STK_K_RUNNING != atomic_read(&stk->cali_status))
+    {
+        //stk_get_cali(stk, cali);
+		data[0] = stk->cali_sw[STK_AXIS_X] *GRAVITY_EARTH_1000 / stk->sensitivity;
+		data[1] = stk->cali_sw[STK_AXIS_Y] *GRAVITY_EARTH_1000 / stk->sensitivity;
+		data[2] = stk->cali_sw[STK_AXIS_Z] *GRAVITY_EARTH_1000 / stk->sensitivity;
+		
+    }
+    else
+    {
+        data[0] = 0;
+        data[1] = 0;
+        data[2] = 0;
+    }
+    */
+
+	STK_ACC_LOG("x:%d, y:%d, z:%d", data[0], data[1], data[2]);
+    return 0;
+}
+
+static int stk_factory_do_self_test(void)
+{
+	STK_ACC_LOG("entry");
+    return 0;
+}
+
+static struct accel_factory_fops stk_factory_fops =
+{
+    .enable_sensor = stk_factory_enable_sensor,
+    .get_data = stk_factory_get_data,
+    .get_raw_data = stk_factory_get_raw_data,
+    .enable_calibration = stk_factory_enable_cali,
+    .clear_cali = stk_factory_clear_cali,
+    .set_cali = stk_factory_set_cali,
+    .get_cali = stk_factory_get_cali,
+    .do_self_test = stk_factory_do_self_test,
+};
+
+static struct accel_factory_public stk_factory_device =
+{
+    .gain = 1,
+    .sensitivity = 1,
+    .fops = &stk_factory_fops,
+};
+
+/**
+ * @brief: Proble function for i2c_driver.
+ *
+ * @param[in] client: struct i2c_client *
+ * @param[in] id: struct i2c_device_id *
+ *
+ * @return: Success or fail
+ *          0: Success
+ *          others: Fail
+ */
 static int stk8baxx_i2c_probe(struct i2c_client *client, const struct i2c_device_id *id)
 {
-	struct i2c_client *new_client;
-	struct stk8baxx_i2c_data *obj;
-	struct acc_control_path ctl = { 0 };
-	struct acc_data_path data = { 0 };
-	int err = 0;
+    int error = 0;
+    struct stk8baxx_data *stk;
+    struct acc_control_path stk_acc_control_path = {0};
+    struct acc_data_path stk_acc_data_path = {0};
+    STK_ACC_LOG("driver version:%s", STK_ACC_DRIVER_VERSION);
+    /* kzalloc: allocate memory and set to zero. */
+    stk = kzalloc(sizeof(struct stk8baxx_data), GFP_KERNEL);
 
-	GSE_FUN();
-	GSE_ERR("%s: i2c_probe>>srx--stk8ba50, driver version: %s\n", __func__,
-		STK_DRIVER_VERSION);
+    if (!stk)
+    {
+        STK_ACC_ERR("memory allocation error");
+        return -ENOMEM;
+    }
 
-	obj = kzalloc(sizeof(*obj), GFP_KERNEL);
-	if (!obj) {
-		err = -ENOMEM;
-		goto exit;
+    error = get_accel_dts_func(client->dev.of_node, &stk->hw);
+
+    if (0 > error)
+    {
+        STK_ACC_ERR("Dts info fail");
+        goto err_free_mem;
+    }
+
+	STK_ACC_LOG("before addr=0x%x", client->addr);
+    client->addr = STK8BAXX_SLAVE_ADDR;
+	STK_ACC_LOG("after addr=0x%x", client->addr);
+    /* direction */
+    error = hwmsen_get_convert(stk->hw.direction, &stk->cvt);
+
+    if (error)
+    {
+        STK_ACC_ERR("invalid direction: %d", stk->hw.direction);
+        goto err_free_mem;
+    }
+
+    stk_data = stk;
+    stk->client = client;
+    i2c_set_clientdata(client, stk);
+    //mutex_init(&stk->reg_lock);
+    stk_data_initialize(stk);
+
+    if (stk_get_pid(stk))
+        goto err_mutex_destory;
+
+    STK_ACC_LOG("PID 0x%x", stk->pid);
+
+	if((stk->pid != 0x86) && (stk->pid != 0x87)){
+		error = -EINVAL;
+		STK_ACC_LOG("stk8baxx chipid not match");
+		goto err_free_mem;
 	}
-	GSE_ERR("srx--stk8baxx_i2c_probe-dts_func-node-name=%s\n", client->dev.of_node->name);
+#ifdef INTERRUPT_MODE
+    error = stk_interrupt_mode_setup(stk);
 
-	err = get_accel_dts_func(client->dev.of_node, &obj->hw);
-	if (err < 0) {
-		GSE_ERR("get dts info fail\n");
-		return -1;
-	}
+    if (0 > error)
+        goto err_mutex_destory;
 
-	err = hwmsen_get_convert(obj->hw.direction, &obj->cvt);
-	if (err) {
-		GSE_ERR("invalid direction: %d\n", obj->hw.direction);
-		goto exit;
-	}
+#else /* no INTERRUPT_MODE */
+    error = stk_polling_mode_setup(stk);
+
+    if (0 > error)
+        goto err_mutex_destory;
+
+#endif /* INTERRUPT_MODE */
+
+    if (stk_reg_init(stk))
+    {
+        STK_ACC_ERR("stk8baxx initialization failed");
+        goto exit_stk_init_error;
+    }
+
+#if 0
+    error = misc_register(&stk_miscdevice);
+
+    if (error)
+    {
+        STK_ACC_ERR("stk8baxx misc_register failed");
+        goto exit_misc_error;
+    }
+#endif 
+	STK_ACC_ERR("misc name:%s", stk_miscdevice.name);
+	
+	STK_ACC_ERR("stk_create_attr...");
+    error = stk_create_attr(&stk_acc_init_info.platform_diver_addr->driver);
+
+    if (error)
+    {
+        STK_ACC_ERR("stk_create_attr failed");
+        goto exit_misc_error;
+    }
+
+	STK_ACC_ERR("acc control...");
+    /* MTK Android usage +++ */
+    stk_acc_control_path.is_use_common_factory = false;
+    /* factory */
+#if 1	
+
+    error = accel_factory_device_register(&stk_factory_device);
+    if (error)
+    {
+        STK_ACC_ERR("accel_factory_device_register failed");
+        goto exit_misc_error;
+    }
+#endif 	
+
+    stk_acc_control_path.open_report_data = gsensor_open_report_data;
 #ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB
-	INIT_WORK(&obj->irq_work, gsensor_irq_work);
-#endif				/* #ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB */
+    stk_acc_control_path.enable_nodata = scp_gsensor_enable_nodata;
+    stk_acc_control_path.is_support_batch = stk_acc_hw->is_batch_support;
+#else /* CONFIG_CUSTOM_KERNEL_SENSORHUB */
+    stk_acc_control_path.enable_nodata = gsensor_enable_nodata;
+    stk_acc_control_path.is_support_batch = false;
+#endif /* CONFIG_CUSTOM_KERNEL_SENSORHUB */
+    stk_acc_control_path.batch = gsensor_batch;
+    stk_acc_control_path.flush = gsensor_flush;
+    stk_acc_control_path.set_delay = gsensor_set_delay;
+    stk_acc_control_path.is_report_input_direct = false;
+    error = acc_register_control_path(&stk_acc_control_path);
 
-	obj_i2c_data = obj;
-	obj->client = client;
-	new_client = obj->client;
-	i2c_set_clientdata(new_client, obj);
+    if (error)
+    {
+        STK_ACC_ERR("acc_register_control_path fail");
+        goto exit_register_control_path;
+    }
 
-	atomic_set(&obj->trace, 0);
-	atomic_set(&obj->suspend, 0);
-	atomic_set(&obj->event_since_en, 0);
-	atomic_set(&obj->event_since_en_limit, STK_EVENT_SINCE_EN_LIMIT_DEF);
-#ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB
-	obj->SCP_init_done = 0;
-#endif				/* #ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB */
+    stk_acc_data_path.get_data = gsensor_get_data;
+    stk_acc_data_path.vender_div = 1000;
+    error = acc_register_data_path(&stk_acc_data_path);
 
-#ifdef CONFIG_STK8BAXX_LOWPASS
-	if (obj->hw.firlen > C_MAX_FIR_LENGTH)
-		atomic_set(&obj->firlen, C_MAX_FIR_LENGTH);
-	else
-		atomic_set(&obj->firlen, obj->hw.firlen);
+    if (error)
+    {
+        STK_ACC_ERR("acc_register_data_path fail");
+        goto exit_register_control_path;
+    }
 
-	if (atomic_read(&obj->firlen) > 0) {
-		atomic_set(&obj->fir_en, 1);
-		atomic_set(&obj->filter, 1);
-	}
-#endif
-
-	stk8baxx_i2c_client = new_client;
-
-	err = stk8baxx_init_client(new_client, 1);
-	if (err)
-		goto exit_init_failed;
-
-	err = misc_register(&stk8baxx_device);
-	if (err) {
-		GSE_ERR("stk8baxx_device register failed\n");
-		goto exit_misc_device_register_failed;
-	}
-
-	err = stk8baxx_create_attr(&stk8baxx_init_info.platform_diver_addr->driver);
-	if (err) {
-		GSE_ERR("create attribute err = %d\n", err);
-		goto exit_create_attr_failed;
-	}
-
-	ctl.open_report_data = gsensor_open_report_data;
-#ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB
-	ctl.enable_nodata = scp_gsensor_enable_nodata;
-#else
-	ctl.enable_nodata = gsensor_enable_nodata;
-#endif
-	ctl.batch = stk8baxx_batch;
-	ctl.flush = stk8baxx_flush;
-	ctl.set_delay = gsensor_set_delay;
-	ctl.is_report_input_direct = false;
-
-#ifdef CONFIG_CUSTOM_KERNEL_SENSORHUB
-	ctl.is_support_batch = obj->hw.is_batch_supported;
-#else
-	ctl.is_support_batch = false;
-#endif
-
-	err = acc_register_control_path(&ctl);
-	if (err) {
-		GSE_ERR("register acc control path err\n");
-		goto exit_create_attr_failed;
-	}
-
-	GSE_LOG("acc_register_control_path success\n");
-
-	data.get_data = gsensor_get_data;
-	data.vender_div = 1000;
-	err = acc_register_data_path(&data);
-	if (err) {
-		GSE_ERR("register acc data path err\n");
-		goto exit_create_attr_failed;
-	}
-
-	GSE_LOG("acc,batch_register_support_info success\n");
-	gsensor_init_flag = 0;
-	GSE_LOG("%s: OK\n", __func__);
-	GSE_LOG("stk8baxx_i2c_probe success\n");
-
-#ifdef ONTIM_CALI
-	if (obj->hw.calib_enable) {
-		/* 0--disable auto clib;  1--enable auto clib; 2--auto calib running; 3--auto calib OK */
-		stk8baxx_audo_cali_enable = (obj->hw.auto_calib_enable) ? 1 : 0;
-		s_CaliLoadEnable = true;
-	}
-#endif
-	return 0;
-
-exit_create_attr_failed:
-	misc_deregister(&stk8baxx_device);
-exit_misc_device_register_failed:
-exit_init_failed:
-	/* i2c_detach_client(new_client); */
-	kfree(obj);
-exit:
-	obj = NULL;
-	obj_i2c_data = NULL;
-	GSE_ERR("%s: err = %d\n", __func__, err);
-	gsensor_init_flag = -1;
-	return err;
+    /* MTK Android usage --- */
+    stk8baxx_init_flag = 0;
+	STK_ACC_LOG("final addr=0x%x", client->addr);
+    STK_ACC_LOG("Success");
+    return 0;
+exit_register_control_path:
+    stk_create_attr_exit(&stk_acc_init_info.platform_diver_addr->driver);
+exit_misc_error:
+    //misc_deregister(&stk_miscdevice);
+exit_stk_init_error:
+#ifdef INTERRUPT_MODE
+    stk_interrupt_mode_exit(stk);
+#else /* no INTERRUPT_MODE */
+    stk_polling_mode_exit(stk);
+#endif /* INTERRUPT_MODE */
+err_mutex_destory:
+    //mutex_destroy(&stk->reg_lock);
+err_free_mem:
+    kfree(stk);
+    stk8baxx_init_flag = -1;
+    return -1;
 }
 
-/*----------------------------------------------------------------------------*/
+/**
+ * @brief
+ */
 static int stk8baxx_i2c_remove(struct i2c_client *client)
 {
-	int err = 0;
-
-	err = stk8baxx_delete_attr(&stk8baxx_init_info.platform_diver_addr->driver);
-	if (err)
-		GSE_ERR("stk8baxx_delete_attr fail: %d\n", err);
-
-	err = misc_deregister(&stk8baxx_device);
-	if (err)
-		GSE_ERR("misc_deregister fail: %d\n", err);
-
-	stk8baxx_i2c_client = NULL;
-	i2c_unregister_device(client);
-	kfree(i2c_get_clientdata(client));
-
-	return 0;
+    struct stk8baxx_data *stk = i2c_get_clientdata(client);
+    accel_factory_device_deregister(&stk_factory_device);
+    stk_create_attr_exit(&stk_acc_init_info.platform_diver_addr->driver);
+    //misc_deregister(&stk_miscdevice);
+#ifdef INTERRUPT_MODE
+    stk_interrupt_mode_exit(stk);
+#else /* no INTERRUPT_MODE */
+    stk_polling_mode_exit(stk);
+#endif /* INTERRUPT_MODE */
+    //mutex_destroy(&stk->reg_lock);
+    kfree(stk);
+    return 0;
 }
 
-/*----------------------------------------------------------------------------*/
-static int gsensor_local_init(void)
+#ifdef CONFIG_PM_SLEEP
+/**
+ * @brief:
+ */
+static int stk_suspend(struct device *dev)
 {
-	GSE_FUN();
-	GSE_ERR("srx-gsensor_local_init>>>\n");
-	if (i2c_add_driver(&stk8baxx_i2c_driver)) {
-		GSE_ERR("add driver error\n");
-		return -1;
-	}
-	GSE_ERR("srx-gsensor_local_init<<<,gsensor_init_flag=%d\n", gsensor_init_flag);
-	if (-1 == gsensor_init_flag)
-		return -1;
-	return 0;
+    struct i2c_client *client = to_i2c_client(dev);
+    struct stk8baxx_data *stk = i2c_get_clientdata(client);
+
+    if (NULL == stk)
+    {
+        STK_ACC_ERR("Null point to find stk8baxx_data");
+        return -EINVAL;
+    }
+
+    if (STK8BAXX_PWMD_SUSPEND != stk->power_mode)
+    {
+        u8 val = 0;
+
+        if (stk8baxx_reg_read(stk, STK8BAXX_REG_POWMODE, 0, &val))
+            return -EINVAL;
+
+        val &= STK8BAXX_PWMD_SLP_MASK;
+        if (stk8baxx_reg_write(stk, STK8BAXX_REG_POWMODE, (val | STK8BAXX_PWMD_SUSPEND)))
+            return -EINVAL;
+    }
+
+    return 0;
 }
 
-/*----------------------------------------------------------------------------*/
-static int gsensor_remove(void)
+/**
+ * @brief:
+ */
+static int stk_resume(struct device *dev)
 {
-	GSE_FUN();
-	i2c_del_driver(&stk8baxx_i2c_driver);
-	return 0;
+    struct i2c_client *client = to_i2c_client(dev);
+    struct stk8baxx_data *stk = i2c_get_clientdata(client);
+
+    if (NULL == stk)
+    {
+        STK_ACC_ERR("Null point to find stk8baxx_data");
+        return -EINVAL;
+    }
+
+    if (STK8BAXX_PWMD_SUSPEND != stk->power_mode)
+    {
+        u8 val = 0;
+
+        if (stk8baxx_reg_read(stk, STK8BAXX_REG_POWMODE, 0, &val))
+            return -EINVAL;
+
+        val &= STK8BAXX_PWMD_SLP_MASK;
+        if (stk8baxx_reg_write(stk, STK8BAXX_REG_POWMODE, (val | stk->power_mode)))
+            return -EINVAL;
+    }
+
+    return 0;
+}
+#endif /* CONFIG_PM_SLEEP */
+
+static const struct i2c_device_id stk8baxx_i2c_id[] =
+{
+    {STK_ACC_DEV_NAME, 0},
+    {}
+};
+MODULE_DEVICE_TABLE(i2c, stk8baxx_i2c_id);
+
+static const struct of_device_id stk_acc_match[] =
+{
+    {.compatible = "mediatek,gsensor2"},
+    {},
+};
+MODULE_DEVICE_TABLE(i2c, stk_acc_match);
+
+#ifdef CONFIG_PM_SLEEP
+static const struct dev_pm_ops stk_i2c_pm_ops =
+{
+    SET_SYSTEM_SLEEP_PM_OPS(stk_suspend, stk_resume)
+};
+#endif /* CONFIG_PM_SLEEP */
+
+static struct i2c_driver stk8baxx_i2c_driver =
+{
+    .probe          = stk8baxx_i2c_probe,
+    .remove         = stk8baxx_i2c_remove,
+    .id_table       = stk8baxx_i2c_id,
+    .driver         = {
+        .name               = STK_ACC_DEV_NAME,
+#ifdef CONFIG_PM_SLEEP
+        .pm                 = &stk_i2c_pm_ops,
+#endif /* CONFIG_PM_SLEEP */
+        .of_match_table     = stk_acc_match,
+    },
+};
+
+/**
+ * @brief:
+ *
+ * @return: Success or fail
+ *          0: Success
+ *          others: Fail
+ */
+static int stk_acc_init(void)
+{
+    STK_ACC_FUN();
+
+    if (i2c_add_driver(&stk8baxx_i2c_driver))
+    {
+        STK_ACC_ERR("Add i2c driver fail");
+        return -1;
+    }
+
+    if ( -1 == stk8baxx_init_flag)
+    {
+        STK_ACC_ERR("stk8baxx init error");
+        return -1;
+    }
+
+    return 0;
 }
 
-/*----------------------------------------------------------------------------*/
+/**
+ * @brief:
+ *
+ * @return: Success
+ *          0: Success
+ */
+static int stk_acc_uninit(void)
+{
+    i2c_del_driver(&stk8baxx_i2c_driver);
+    return 0;
+}
+
+/**
+ * @brief:
+ *
+ * @return: Success or fail.
+ *          0: Success
+ *          others: Fail
+ */
 static int __init stk8baxx_init(void)
 {
-	GSE_FUN();
+    STK_ACC_FUN();
 
-	acc_driver_add(&stk8baxx_init_info);
-
-#ifdef STK_PERMISSION_THREAD
-	STKPermissionThread = kthread_run(stk_permission_thread, "stk", "Permissionthread");
-	if (IS_ERR(STKPermissionThread))
-		STKPermissionThread = NULL;
-#endif				/* STK_PERMISSION_THREAD */
-	return 0;
+    acc_driver_add(&stk_acc_init_info);
+#ifdef CONFIG_CUSTOM_KERNEL_ACCELEROMETER_MODULE
+    success_Flag = true;
+#endif /* CONFIG_CUSTOM_KERNEL_ACCELEROMETER_MODULE */
+    return 0;
 }
 
-/*----------------------------------------------------------------------------*/
 static void __exit stk8baxx_exit(void)
 {
-	GSE_FUN();
+    STK_ACC_FUN();
+#ifdef CONFIG_CUSTOM_KERNEL_ACCELEROMETER_MODULE
+    success_Flag = false;
+#endif /* CONFIG_CUSTOM_KERNEL_ACCELEROMETER_MODULE */
 }
 
-/*----------------------------------------------------------------------------*/
 module_init(stk8baxx_init);
 module_exit(stk8baxx_exit);
-/*----------------------------------------------------------------------------*/
+
+MODULE_AUTHOR("Sensortek");
+MODULE_DESCRIPTION("stk8baxx 3-Axis accelerometer driver");
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("stk8baxx I2C driver");
-MODULE_AUTHOR("lex_hsieh@sensortek.com.tw");
+MODULE_VERSION(STK_ACC_DRIVER_VERSION);

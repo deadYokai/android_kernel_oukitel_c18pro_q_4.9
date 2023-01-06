@@ -1,8 +1,8 @@
-config MTK_STK8BAXX
-	bool "MTK_STK8BAXX for MediaTek package"
+config MTK_STK8BA50
+	bool "MTK_STK8BA50 for MediaTek package"
 	default n
 	help
-	  The STK8BA50 is a highly integrated,
+	  The MTK_STK8BA50 is a highly integrated,
 	  low power internal measurement unit
 	  that provides precise acceleration
 	  measurement.

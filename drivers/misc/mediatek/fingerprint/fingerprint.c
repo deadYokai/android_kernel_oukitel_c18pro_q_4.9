@@ -11,8 +11,8 @@
 #include <linux/hct_include/hct_project_all_config.h>
 #include <linux/gpio.h>
 #include <linux/spi/spi.h>
-#include "mt_spi.h"
-#include "../../../spi/mediatek/mt6755/mt_spi.h" //modify zy
+#include "mtk_spi.h"
+#include "../../../spi/mediatek/mt6757/mtk_spi.h" //modify zy
 #include "fingerprint.h"
 
 

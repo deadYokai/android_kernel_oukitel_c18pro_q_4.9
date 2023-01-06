@@ -34,7 +34,7 @@
 #include <linux/of_irq.h>
 #include <linux/gpio.h>
 #include <linux/miscdevice.h>
-#include "mt_spi.h"
+#include "mtk_spi.h"
 
 extern void hct_waite_for_finger_dts_paser(void);
 extern int hct_finger_set_spi_mode(int cmd);

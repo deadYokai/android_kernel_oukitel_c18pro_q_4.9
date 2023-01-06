@@ -41,7 +41,7 @@
 
 /* #include <mach/irqs.h> */
 #ifdef CONFIG_MTK_CLKMGR
-#include <mach/mt_clkmgr.h>
+#include <mach/mtk_clkmgr.h>
 #endif
 /* #include "mach/irqs.h" */
 

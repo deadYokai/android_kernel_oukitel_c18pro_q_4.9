@@ -36,6 +36,8 @@ ifeq ($(CONFIG_MTK_FLASHLIGHT_AW3644),y)
 ccflags-y += -DCONFIG_MTK_FLASHLIGHT_AW3644
 endif
 subdir-ccflags-y += \
+	-I$(MTK_CUSTOM_PATH)/flashlight/inc \
+	-I$(MTK_CUSTOM_PATH)/imgsensor/inc \
 	-I$(MTK_CUSTOM_PATH)/include/mt-plat \
 	-I$(MTK_CUSTOM_PATH)/include/mt-plat/$(MTK_PLATFORM)/include/mach \
 	-I$(MTK_CUSTOM_PATH)/pmic/include \

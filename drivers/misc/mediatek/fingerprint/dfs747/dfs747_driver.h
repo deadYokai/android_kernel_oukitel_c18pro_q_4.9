@@ -2,7 +2,7 @@
 #define __DFS747_DRIVER_H__
 
 #include <linux/spi/spi.h>
-#include <../../../../../../kernel-3.18/drivers/spi/mediatek/mt6755/mt_spi.h>
+#include "../../../../spi/mediatek/mt6757/mtk_spi.h"
 
 extern void hct_waite_for_finger_dts_paser(void);
 extern int hct_finger_set_power(int cmd);

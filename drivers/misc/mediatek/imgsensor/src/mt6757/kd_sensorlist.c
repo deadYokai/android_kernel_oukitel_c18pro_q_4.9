@@ -29,7 +29,7 @@
 #include "kd_camera_hw.h"
 #include "kd_camera_typedef.h"
 #ifdef CONFIG_MTK_CLKMGR
-#include <mach/mt_clkmgr.h>
+#include <mach/mtk_clkmgr.h>
 #else
 #include <linux/clk.h>
 #endif

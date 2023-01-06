@@ -41,7 +41,7 @@
 #include <linux/irq.h>
 /* #include <asm/scatterlist.h> */
 #include <mt-plat/dma.h>
-/* #include <mach/mt_clkmgr.h> */
+#include <mach/mtk_clkmgr.h>
 #include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/syscore_ops.h>
